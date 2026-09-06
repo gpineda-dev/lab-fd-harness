@@ -1,0 +1,6 @@
+2026-09-06 14:00:01 [INFO] Server booting up on port 8080...
+2026-09-06 14:00:02 [DEBUG] GitHub sync with token: ghp_11223344556677889900aabbccddeeff1122
+2026-09-06 14:00:05 [INFO] User login success with Authorization: Bearer token_secret_xyz123456789
+2026-09-06 14:00:08 [DEBUG] Cloud S3 upload authorized via AKIAIOSFODNN7EXAMPLE
+2026-09-06 14:00:10 [DEBUG] Identity verification JWT=eyJhbGciOiJIUzI1NiJ9.eyJncm91cCI6ImFkbWluIn0.abcdef1234567890
+2026-09-06 14:00:12 [INFO] Request completed cleanly with 200 OK.

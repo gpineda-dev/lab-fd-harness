@@ -1,0 +1,26 @@
+# samples/11-redact/dlp-rules.toml
+# Data Loss Prevention (DLP) masking rules for fd-harness redact
+
+[dlp]
+fail_on_leak = false
+summary = true
+
+[[rules]]
+name = "github-pat"
+pattern = 'ghp_[A-Za-z0-9_]{36}'
+replacement = "[REDACTED_GH_TOKEN]"
+
+[[rules]]
+name = "jwt"
+pattern = 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+replacement = "[REDACTED_JWT_TOKEN]"
+
+[[rules]]
+name = "aws-key"
+pattern = 'AKIA[0-9A-Z]{16}'
+replacement = "[REDACTED_AWS_KEY]"
+
+[[rules]]
+name = "bearer-auth"
+pattern = '(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._~+/-]+'
+replacement = "Authorization: Bearer [REDACTED_BEARER]"

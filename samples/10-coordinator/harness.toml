@@ -1,0 +1,15 @@
+# samples/10-coordinator/harness.toml
+# Declarative multi-engine coordination manifest for fd-harness
+
+[coordinator]
+show_directives = false
+
+[[engines]]
+name = "consumer"
+command = ["./consumer.sh"]
+attach_stdin = false
+
+[[engines]]
+name = "producer"
+command = ["./producer.sh"]
+attach_stdin = false
