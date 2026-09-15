@@ -121,7 +121,9 @@ TEMPORAL_UNITS = {
     "µs": 0.000001,
     "ms": 0.001,
     "s": 1.0,
+    "sec": 1.0,
     "m": 60.0,
+    "min": 60.0,
     "h": 3600.0,
 }
 
@@ -134,7 +136,7 @@ class TemporalGrammar(Grammar):
 
     def tokenize(self, text: str) -> List[Token]:
         tokens: List[Token] = []
-        pattern = re.compile(r"(\d+(?:\.\d+)?)|(us|µs|ms|s|m|h)\b|(\*\*|\^)|([+\-*/%()])")
+        pattern = re.compile(r"(\d+(?:\.\d+)?|\.\d+)|(us|µs|ms|sec|min|s|m|h)\b|(\*\*|\^)|([+\-*/%()])")
         for match in pattern.finditer(text):
             num, unit, pow_op, op = match.groups()
             if num is not None:
@@ -257,7 +259,7 @@ class MathGrammar(Grammar):
     def tokenize(self, text: str) -> List[Token]:
         tokens: List[Token] = []
         pattern = re.compile(
-            r"(\d+(?:\.\d+)?)|(us|µs|ms|s|m|h)\b|([a-zA-Z_][a-zA-Z0-9_]*)|(\*\*|\^)|([+\-*/%(),])"
+            r"(\d+(?:\.\d+)?|\.\d+)|(us|µs|ms|sec|min|s|m|h)\b|([a-zA-Z_][a-zA-Z0-9_]*)|(\*\*|\^)|([+\-*/%(),])"
         )
         for match in pattern.finditer(text):
             num, unit, ident, pow_op, op = match.groups()

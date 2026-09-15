@@ -3,6 +3,7 @@ engine.py - Autonomous execution runtime for a single supervised process.
 Encapsulates process lifecycle, file descriptor plumbing, scheduler, and coprocessors.
 """
 import os
+from pathlib import Path
 import subprocess
 from typing import Dict, List, Optional
 
@@ -10,6 +11,7 @@ from harness.coproc import CoprocessorContext, CoprocessorRegistry, coprocessor_
 from harness.core.bus import EventBus
 from harness.core.channel import FDChannel
 from harness.core.codec import AnnotationCodec
+from harness.core.logger import HarnessLogger
 from harness.core.model import Event, Instruction
 from harness.core.router import CoprocessorRouter
 from harness.core.scheduler import HeapScheduler
@@ -28,6 +30,10 @@ class HarnessEngine:
         name: str = "",
         strace_file: Optional[str] = None,
         show_directives: bool = False,
+        log_level: Optional[str] = None,
+        log_target: Optional[str] = None,
+        log_format: Optional[str] = None,
+        logger: Optional[HarnessLogger] = None,
         shared_variables: Optional[Dict[str, float]] = None,
         bus: Optional[EventBus] = None,
         attach_stdin: bool = True,
@@ -38,9 +44,19 @@ class HarnessEngine:
         redirect_stderr: bool = False,
     ):
         self.child_cmd = child_cmd
-        self.name = name or (child_cmd[0] if child_cmd else "engine")
+        self.name = name or (Path(child_cmd[0]).name if child_cmd else "engine")
         self.strace_file = strace_file
         self.show_directives = show_directives
+        self.log_level = log_level or ("all" if show_directives else None)
+        self.log_target = log_target
+        self.log_format = log_format
+        self._owns_logger = logger is None
+        self.logger = logger or HarnessLogger(
+            level=self.log_level,
+            target=log_target or ":stdout",
+            format=log_format or "text",
+            default_engine=self.name,
+        )
         self.shared_variables = shared_variables if shared_variables is not None else {}
         self.bus = bus
         self.attach_stdin = attach_stdin
@@ -83,6 +99,10 @@ class HarnessEngine:
             os.dup2(event_r, 3)
             os.dup2(user_r, 4)
 
+        child_env = dict(os.environ)
+        child_env["HARNESS_ACTIVE"] = "1"
+        child_env["HARNESS_ENGINE"] = self.name
+
         try:
             self.proc = subprocess.Popen(
                 cmd,
@@ -90,6 +110,7 @@ class HarnessEngine:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT if self.redirect_stderr else None,
                 cwd=self.cwd,
+                env=child_env,
                 bufsize=0,    # Unbuffered raw bytes
                 pass_fds=[3, 4, event_r, user_r],
                 preexec_fn=preexec,
@@ -110,6 +131,9 @@ class HarnessEngine:
             emit_event=emit_event,
             variables=self.shared_variables,
             bus=self.bus,
+            engine_name=self.name,
+            log_level=self.log_level,
+            logger=self.logger,
         )
         self.router = CoprocessorRouter(self.registry, self.ctx)
 
@@ -123,6 +147,9 @@ class HarnessEngine:
             on_instruction_cb=self.router.handle_instruction,
             extra_fds={3: event_w},
             show_directives=self.show_directives,
+            engine_name=self.name,
+            log_level=self.log_level,
+            logger=self.logger,
             on_prompt_cb=self.editor.set_prompt,
             apply_filters=self.ctx.apply_stream_filters,
         )
@@ -195,6 +222,9 @@ class HarnessEngine:
             except OSError:
                 pass
             self.event_w = None
+
+        if self._owns_logger and self.logger is not None:
+            self.logger.close()
 
         return ret
 

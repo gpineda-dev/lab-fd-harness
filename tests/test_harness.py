@@ -18,6 +18,7 @@ from harness.core import (
     HeapScheduler,
     MemoryChannel,
 )
+from harness.core.model import TimeRequest, TimeResult
 
 
 class VirtualClock:
@@ -604,6 +605,530 @@ class TestHarness(unittest.TestCase):
         # 6. Preserves --help
         args6 = ["run", "--help"]
         self.assertEqual(normalize_cli_args(args6), args6)
+
+        # 7. Run with --log-level preceding script
+        args7 = ["run", "--log-level", "io", "./script.sh", "--foo"]
+        self.assertEqual(
+            normalize_cli_args(args7),
+            ["run", "--log-level", "io", "--", "./script.sh", "--foo"],
+        )
+
+    def test_io_trace_log_format(self):
+        import io
+        import sys
+        from unittest.mock import MagicMock
+        from harness.core.channel import FDChannel
+        from harness.core.model import ClockWaitResult
+
+        mock_proc = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stdin.fileno.return_value = 11
+        mock_proc.stdin.closed = False
+
+        codec = AnnotationCodec()
+        received_instructions = []
+
+        channel = FDChannel(
+            proc=mock_proc,
+            codec=codec,
+            on_instruction_cb=lambda inst: received_instructions.append(inst),
+            engine_name="test-worker",
+            log_level="io",
+        )
+
+        # Capture sys.stdout
+        old_stdout = sys.stdout
+        captured = io.StringIO()
+        try:
+            sys.stdout = captured
+            channel._handle_decoded_line("# @harness.clock:wait id=main\n")
+            tick_event = ClockWaitResult(clock_id="main", cycle=0, skipped=0, lag_ms=0.0, monotonic_ts=100.0, status="ok")
+            channel.send_event(tick_event)
+        finally:
+            sys.stdout = old_stdout
+
+        out = captured.getvalue()
+        self.assertIn("# [HARNESS]", out)
+        self.assertIn("[test-worker]", out)
+        self.assertIn("[IO:READ  FD 1]", out)
+        self.assertIn("# @harness.clock:wait id=main", out)
+        self.assertIn("[IO:WRITE FD 0]", out)
+        self.assertIn("tick main 0 0 0.000 100.0000 ok", out)
+
+    def test_clock_grid_phase_alignment(self):
+        from harness.coproc.timer import compute_align_delay
+
+        # 1. Test delay computation
+        self.assertAlmostEqual(compute_align_delay("*/1s", now_epoch=100.4), 0.6)
+        self.assertAlmostEqual(compute_align_delay("*/100ms", now_epoch=100.042), 0.058, places=4)
+        self.assertAlmostEqual(compute_align_delay("@second", now_epoch=10.2), 0.8)
+        self.assertAlmostEqual(compute_align_delay("*/250ms", now_epoch=10.1), 0.15, places=4)
+
+        # 2. Test grid alignment in pull synchronizer
+        clock = VirtualClock(100.042)
+        scheduler = HeapScheduler(time_fn=clock.now)
+        codec = AnnotationCodec()
+
+        channel_holder = []
+
+        def emit_event(ev):
+            channel_holder[0].send_event(ev)
+
+        coprocessor = TimerCoprocessor(scheduler, emit_event, epoch_fn=clock.now)
+        channel = MemoryChannel(codec, coprocessor.handle_instruction)
+        channel_holder.append(channel)
+
+        # Init clock aligned to 100ms grid: next boundary is 100.100 (delay = 0.058s)
+        channel.feed_line('# @harness.clock:init id=grid interval=0.1 align="*/100ms" cycles=3')
+        channel.feed_line('# @harness.clock:wait id=grid')
+
+        # At T=100.042, Cycle 0 should NOT have fired synchronously because T0=100.100 is in the future
+        self.assertEqual(len(channel.sent_messages), 0)
+
+        # Advance to T=100.100 and trigger scheduler
+        clock.advance(0.058)
+        scheduler.pop_due_events()
+
+        self.assertEqual(len(channel.sent_messages), 1)
+        self.assertTrue(channel.sent_messages[-1].startswith("tick grid 0 0"))
+        parts = channel.sent_messages[-1].strip().split()
+        self.assertAlmostEqual(float(parts[5]), 100.1, places=2)
+
+        # Cycle 1 wait
+        channel.feed_line('# @harness.clock:wait id=grid')
+        clock.advance(0.1)
+        scheduler.pop_due_events()
+
+        self.assertEqual(len(channel.sent_messages), 2)
+        self.assertTrue(channel.sent_messages[-1].startswith("tick grid 1 0"))
+        parts = channel.sent_messages[-1].strip().split()
+        self.assertAlmostEqual(float(parts[5]), 100.2, places=2)
+
+    def test_dlp_coprocessor_verbose_and_named_rules(self):
+        from harness.coproc.dlp import DlpCoprocessor
+        import io
+        import sys
+
+        ctx = CoprocessorContext(
+            scheduler=HeapScheduler(),
+            emit_event=lambda ev: None,
+            engine_name="test-worker",
+            log_level="dlp",
+        )
+        dlp = DlpCoprocessor(ctx, verbose=True, print_summary=True)
+        dlp.add_rule(pattern=r"ghp_[0-9a-zA-Z]{10}", replacement="[GH_MASKED]", name="gh-token")
+        dlp.add_rule(pattern=r"AKIA[0-9A-Z]{8}", replacement="[AWS_MASKED]", name="aws-token")
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        try:
+            sys.stdout, sys.stderr = stdout_buf, stderr_buf
+            dlp.emit_startup_info()
+            line1 = ctx.apply_stream_filters("Connecting with ghp_1234567890 securely\n")
+            line2 = ctx.apply_stream_filters("All clean here\n")
+            dlp.emit_audit_summary()
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
+        self.assertEqual(line1, "Connecting with [GH_MASKED] securely\n")
+        self.assertEqual(line2, "All clean here\n")
+
+        stdout_out = stdout_buf.getvalue()
+        self.assertIn("# [HARNESS]", stdout_out)
+        self.assertIn("[test-worker]", stdout_out)
+        self.assertIn("[DLP:INIT ]", stdout_out)
+        self.assertIn("gh-token", stdout_out)
+        self.assertIn("[IO:READ  FD 1]", stdout_out)
+        self.assertIn("ghp_1234567890", stdout_out)
+        self.assertIn("[DLP:MUTATE]", stdout_out)
+        self.assertIn("[DLP:AUDIT]", stdout_out)
+
+        stderr_out = stderr_buf.getvalue()
+        self.assertIn("[DLP AUDIT] Security report", stderr_out)
+        self.assertIn("[VIOLATION] gh-token", stderr_out)
+        self.assertIn("[CLEAN]     aws-token", stderr_out)
+
+    def test_logger_text_and_jsonl_formatting(self):
+        import json
+        import tempfile
+        from harness.core.logger import HarnessLogger
+        from harness.core.model import ClockHold, ClockTick, IORead
+
+        # 1. Text format to file
+        with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+            log_path = f.name
+
+        logger_text = HarnessLogger(level="all", target=log_path, format="text", default_engine="bench.sh")
+        logger_text.log(IORead(fd=1, msg="# @harness.clock:wait id=bench"))
+        logger_text.log(ClockHold(id="bench", cycle=0, target=100.5, delay_ms=500.0, align="*/1s", phase_lock=True))
+        logger_text.close()
+
+        with open(log_path, "r", encoding="utf-8") as f:
+            text_lines = f.readlines()
+
+        self.assertEqual(len(text_lines), 2)
+        self.assertIn("[bench.sh]", text_lines[0])
+        self.assertIn("[IO:READ  FD 1]", text_lines[0])
+        self.assertIn("# @harness.clock:wait id=bench", text_lines[0])
+        self.assertIn("[CLOCK:HOLD ]", text_lines[1])
+        self.assertIn("delay=500.0ms (grid phase lock)", text_lines[1])
+
+        # 2. JSONL format to file
+        with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+            jsonl_path = f.name
+
+        logger_jsonl = HarnessLogger(level="clock,io", target=jsonl_path, format="jsonl", default_engine="bench.sh")
+        logger_jsonl.log(IORead(fd=1, msg="# @harness.clock:wait id=bench"))
+        logger_jsonl.log(ClockHold(id="bench", cycle=0, target=100.5, delay_ms=500.0, align="*/1s", phase_lock=True))
+        logger_jsonl.log(ClockTick(id="bench", cycle=0, lag_ms=0.25))
+        logger_jsonl.close()
+
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            json_lines = [json.loads(line) for line in f]
+
+        self.assertEqual(len(json_lines), 3)
+
+        # Verify Record 1: IO:READ
+        rec1 = json_lines[0]
+        self.assertIn("ts", rec1)
+        self.assertEqual(rec1["engine"], "bench.sh")
+        self.assertEqual(rec1["action"], {"domain": "IO", "name": "READ", "fd": 1})
+        self.assertEqual(rec1["payload"], {"msg": "# @harness.clock:wait id=bench"})
+
+        # Verify Record 2: CLOCK:HOLD
+        rec2 = json_lines[1]
+        self.assertEqual(rec2["action"], {"domain": "CLOCK", "name": "HOLD"})
+        self.assertEqual(rec2["payload"]["id"], "bench")
+        self.assertEqual(rec2["payload"]["cycle"], 0)
+        self.assertEqual(rec2["payload"]["target"], 100.5)
+        self.assertEqual(rec2["payload"]["delay_ms"], 500.0)
+        self.assertEqual(rec2["payload"]["grid"], {"align": "*/1s", "phase_lock": True})
+
+        # Verify Record 3: CLOCK:TICK
+        rec3 = json_lines[2]
+        self.assertEqual(rec3["action"], {"domain": "CLOCK", "name": "TICK"})
+        self.assertEqual(rec3["payload"]["id"], "bench")
+        self.assertEqual(rec3["payload"]["cycle"], 0)
+        self.assertEqual(rec3["payload"]["lag_ms"], 0.25)
+
+    def test_logger_level_filtering_and_stderr(self):
+        import io
+        import sys
+        from harness.core.logger import HarnessLogger
+        from harness.core.model import ClockHold, IORead, TimerSleep
+
+        # Stderr target with level="clock" only
+        stderr_buf = io.StringIO()
+        old_stderr = sys.stderr
+        try:
+            sys.stderr = stderr_buf
+            logger = HarnessLogger(level="clock", target=":stderr", format="text", default_engine="filter-test")
+            logger.log(IORead(fd=1, msg="Ignored line"))
+            logger.log(TimerSleep(duration=1.0, target=101.0))
+            logger.log(ClockHold(id="c1", cycle=1, target=10.0, delay_ms=10.0))
+        finally:
+            sys.stderr = old_stderr
+
+        out = stderr_buf.getvalue()
+        self.assertNotIn("IO:READ", out)
+        self.assertNotIn("TIMER:SLEEP", out)
+    def test_schedule_multi_rule_and_tags(self):
+        clock = VirtualClock(100.0)
+        scheduler = HeapScheduler(time_fn=clock.now)
+        codec = AnnotationCodec()
+
+        channel_holder = []
+
+        def emit_event(ev):
+            channel_holder[0].send_event(ev)
+
+        coprocessor = TimerCoprocessor(scheduler, emit_event, epoch_fn=clock.now)
+        channel = MemoryChannel(codec, coprocessor.handle_instruction)
+        channel_holder.append(channel)
+
+        # 1. Init schedule
+        channel.feed_line("# @harness.schedule:init id=agenda")
+
+        # 2. Add two rules: */5s (fast) and */10s (slow)
+        channel.feed_line('# @harness.schedule:rule id=agenda expr="*/5s" tags="fast"')
+        channel.feed_line('# @harness.schedule:rule id=agenda expr="*/10s" tags="slow"')
+
+        # 3. Wait next occurrence: at T=100.0, next 5s slot is 105.0 (fast only)
+        channel.feed_line("# @harness.schedule:wait id=agenda")
+        self.assertEqual(len(channel.sent_messages), 0)  # Sleeping until 105.0
+
+        # Advance to 105.0 and pop
+        clock.advance(5.0)
+        scheduler.pop_due_events()
+        self.assertEqual(len(channel.sent_messages), 1)
+        # Expected: schedule agenda <iso> 0.000 fast ok
+        parts = channel.sent_messages[0].strip().split()
+        self.assertEqual(parts[0], "schedule")
+        self.assertEqual(parts[1], "agenda")
+        self.assertEqual(parts[4], "fast")
+        self.assertEqual(parts[5], "ok")
+
+        # 4. Wait next occurrence: at T=105.0, next slot is 110.0 (both fast and slow!)
+        channel.feed_line("# @harness.schedule:wait id=agenda")
+        clock.advance(5.0)
+        scheduler.pop_due_events()
+        self.assertEqual(len(channel.sent_messages), 2)
+        parts = channel.sent_messages[1].strip().split()
+        self.assertEqual(parts[0], "schedule")
+        self.assertEqual(parts[1], "agenda")
+        self.assertEqual(parts[4], "fast,slow")
+        self.assertEqual(parts[5], "ok")
+
+    def test_schedule_dump_and_resume_catchup(self):
+        import tempfile
+
+        clock = VirtualClock(100.0)
+        scheduler = HeapScheduler(time_fn=clock.now)
+        codec = AnnotationCodec()
+
+        channel_holder = []
+
+        def emit_event(ev):
+            channel_holder[0].send_event(ev)
+
+        coprocessor = TimerCoprocessor(scheduler, emit_event, epoch_fn=clock.now)
+        channel = MemoryChannel(codec, coprocessor.handle_instruction)
+        channel_holder.append(channel)
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            state_path = tf.name
+
+        try:
+            # Session 1: run until T=110.0, dump state
+            channel.feed_line(f'# @harness.schedule:init id=cron policy=catchup state_file="{state_path}"')
+            channel.feed_line('# @harness.schedule:rule id=cron expr="*/5s" tags="job1"')
+            channel.feed_line('# @harness.schedule:rule id=cron expr="*/10s" tags="job2"')
+
+            # T=100.0 -> T=105.0 tick
+            channel.feed_line("# @harness.schedule:wait id=cron")
+            clock.advance(5.0)
+            scheduler.pop_due_events()
+
+            # T=105.0 -> T=110.0 tick
+            channel.feed_line("# @harness.schedule:wait id=cron")
+            clock.advance(5.0)
+            scheduler.pop_due_events()
+            self.assertEqual(len(channel.sent_messages), 2)
+
+            # Explicit dump
+            channel.feed_line(f'# @harness.schedule:dump id=cron file="{state_path}"')
+
+            # Session 2: simulate worker crash/pause and resume at T=132.0 (22s later)
+            clock2 = VirtualClock(132.0)
+            scheduler2 = HeapScheduler(time_fn=clock2.now)
+            channel_holder2 = []
+
+            def emit_event2(ev):
+                channel_holder2[0].send_event(ev)
+
+            coprocessor2 = TimerCoprocessor(scheduler2, emit_event2, epoch_fn=clock2.now)
+            channel2 = MemoryChannel(codec, coprocessor2.handle_instruction)
+            channel_holder2.append(channel2)
+
+            # Init from state file (restores rules and last_checkpoint=110.0)
+            channel2.feed_line(f'# @harness.schedule:init id=cron policy=catchup state_file="{state_path}"')
+
+            # Missed occurrences between 110.0 and 132.0:
+            # 115.0 (job1)
+            # 120.0 (job1, job2)
+            # 125.0 (job1)
+            # 130.0 (job1, job2)
+            # These 4 must replay immediately without advancing time / sleep!
+
+            # Missed 1: 115.0
+            channel2.feed_line("# @harness.schedule:wait id=cron")
+            self.assertEqual(len(channel2.sent_messages), 1)
+            parts = channel2.sent_messages[-1].strip().split()
+            self.assertEqual(parts[4], "job1")
+            self.assertEqual(parts[5], "missed")
+
+            # Missed 2: 120.0
+            channel2.feed_line("# @harness.schedule:wait id=cron")
+            self.assertEqual(len(channel2.sent_messages), 2)
+            parts = channel2.sent_messages[-1].strip().split()
+            self.assertEqual(parts[4], "job1,job2")
+            self.assertEqual(parts[5], "missed")
+
+            # Missed 3: 125.0
+            channel2.feed_line("# @harness.schedule:wait id=cron")
+            self.assertEqual(len(channel2.sent_messages), 3)
+            parts = channel2.sent_messages[-1].strip().split()
+            self.assertEqual(parts[4], "job1")
+            self.assertEqual(parts[5], "missed")
+
+            # Missed 4: 130.0
+            channel2.feed_line("# @harness.schedule:wait id=cron")
+            self.assertEqual(len(channel2.sent_messages), 4)
+            parts = channel2.sent_messages[-1].strip().split()
+            self.assertEqual(parts[4], "job1,job2")
+            self.assertEqual(parts[5], "missed")
+
+            # Next wait: missed queue is empty! Now it waits for future occurrence (135.0)
+            channel2.feed_line("# @harness.schedule:wait id=cron")
+            self.assertEqual(len(channel2.sent_messages), 4)  # No immediate message
+
+            clock2.advance(3.0)  # 132.0 + 3.0 = 135.0
+            scheduler2.pop_due_events()
+            self.assertEqual(len(channel2.sent_messages), 5)
+            parts = channel2.sent_messages[-1].strip().split()
+            self.assertEqual(parts[4], "job1")
+            self.assertEqual(parts[5], "ok")
+
+        finally:
+            import os
+            if os.path.exists(state_path):
+                os.remove(state_path)
+
+    def test_schedule_jsonl_logging(self):
+        import json
+        import tempfile
+        import os
+        from harness.core.logger import HarnessLogger
+        from harness.core.model import ScheduleHoldLog, ScheduleInitLog, ScheduleRuleLog, ScheduleTickLog
+
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
+            jsonl_path = tf.name
+
+        try:
+            logger = HarnessLogger(level="schedule", target=jsonl_path, format="jsonl", default_engine="agenda.sh")
+            logger.log(ScheduleInitLog(id="cron", policy="catchup", state_file="/tmp/sched.json"))
+            logger.log(ScheduleRuleLog(id="cron", expr="0 2 * * *", tags=["backup", "daily"], grid={"type": "cron"}))
+            logger.log(ScheduleHoldLog(id="cron", target=1700000000.0, delay_ms=5000.0, tags=["backup"], grid={"type": "cron"}))
+            logger.log(ScheduleTickLog(id="cron", scheduled="2026-09-13T02:00:00Z", lag_ms=1.25, tags=["backup"], status="ok", grid={"type": "cron"}))
+            logger.close()
+
+            with open(jsonl_path, "r", encoding="utf-8") as f:
+                lines = [json.loads(line) for line in f]
+
+            self.assertEqual(len(lines), 4)
+            self.assertEqual(lines[0]["action"], {"domain": "SCHEDULE", "name": "INIT"})
+            self.assertEqual(lines[0]["payload"]["id"], "cron")
+            self.assertEqual(lines[0]["payload"]["policy"], "catchup")
+
+            self.assertEqual(lines[1]["action"], {"domain": "SCHEDULE", "name": "RULE"})
+            self.assertEqual(lines[1]["payload"]["tags"], ["backup", "daily"])
+
+            self.assertEqual(lines[2]["action"], {"domain": "SCHEDULE", "name": "HOLD"})
+            self.assertEqual(lines[2]["payload"]["delay_ms"], 5000.0)
+
+            self.assertEqual(lines[3]["action"], {"domain": "SCHEDULE", "name": "TICK"})
+            self.assertEqual(lines[3]["payload"]["status"], "ok")
+            self.assertEqual(lines[3]["payload"]["lag_ms"], 1.25)
+        finally:
+            if os.path.exists(jsonl_path):
+                os.remove(jsonl_path)
+
+    def test_minute_step_and_units(self):
+        from harness.core.codec import parse_duration
+        from harness.utils.cron import compute_next_occurrence
+        from harness.coproc.timer import compute_align_delay
+
+        # 1. Units parsing
+        self.assertEqual(parse_duration("1min"), 60.0)
+        self.assertEqual(parse_duration("5min"), 300.0)
+        self.assertEqual(parse_duration("30sec"), 30.0)
+        self.assertEqual(parse_duration("1.5min"), 90.0)
+
+        # 2. Next occurrence with */1min
+        nxt, parsed = compute_next_occurrence("*/1min", after_epoch=100.0)
+        self.assertEqual(nxt, 120.0)
+        self.assertEqual(parsed["type"], "step")
+        self.assertEqual(parsed["step_seconds"], 60.0)
+
+        # 3. Align delay with */1min
+        delay = compute_align_delay("*/1min", now_epoch=100.0)
+        self.assertEqual(delay, 20.0)
+
+    def test_shift_action_golden_path(self):
+        clock = VirtualClock(100.3)
+        scheduler = HeapScheduler(time_fn=clock.now)
+        codec = AnnotationCodec()
+
+        channel_holder = []
+
+        def emit_event(ev):
+            channel_holder[0].send_event(ev)
+
+        coprocessor = TimerCoprocessor(scheduler, emit_event, epoch_fn=clock.now)
+        channel = MemoryChannel(codec, coprocessor.handle_instruction)
+        channel_holder.append(channel)
+
+        # 1. Shift to next round second (*/1s): at 100.3 -> target is 101.0 (delay 0.7s)
+        channel.feed_line('# @harness.shift to="*/1s"')
+        self.assertEqual(len(channel.sent_messages), 0)
+
+        # Advance 0.7s to 101.0
+        clock.advance(0.7)
+        scheduler.pop_due_events()
+        self.assertEqual(len(channel.sent_messages), 1)
+        self.assertEqual(channel.sent_messages[0].strip(), "wakeup")
+
+        # 2. Shift to next minute (*/1min): at 101.0 -> target is 120.0 (delay 19.0s)
+        channel.feed_line('# @harness.shift to="*/1min"')
+        self.assertEqual(len(channel.sent_messages), 1)
+
+        clock.advance(19.0)
+        scheduler.pop_due_events()
+        self.assertEqual(len(channel.sent_messages), 2)
+        self.assertEqual(channel.sent_messages[1].strip(), "wakeup")
+
+    def test_millisecond_cron_expressions(self):
+        from harness.utils.cron import compute_next_occurrence
+
+        # 1. 7-field cron mask: ms sec min hour day month dow
+        # Candidate steps: 0, 250, 500, 750
+        nxt, parsed = compute_next_occurrence("*/250 * * * * * *", after_epoch=100.100)
+        self.assertAlmostEqual(nxt, 100.250, places=5)
+        self.assertEqual(parsed["type"], "cron")
+        self.assertEqual(parsed["millisecond"], "*/250")
+        self.assertEqual(parsed["second"], "*")
+
+        # 2. Specific ms list: 0,500 * * * * * *
+        nxt2, _ = compute_next_occurrence("0,500 * * * * * *", after_epoch=100.000)
+        self.assertAlmostEqual(nxt2, 100.500, places=5)
+
+        # 3. Next cycle wraps over into next second
+        nxt3, _ = compute_next_occurrence("0,500 * * * * * *", after_epoch=100.500)
+        self.assertAlmostEqual(nxt3, 101.000, places=5)
+
+        # 4. Uniform step with ms duration: */250ms
+        nxt4, parsed4 = compute_next_occurrence("*/250ms", after_epoch=100.100)
+        self.assertAlmostEqual(nxt4, 100.250, places=5)
+        self.assertEqual(parsed4["type"], "step")
+        self.assertEqual(parsed4["step_seconds"], 0.25)
+
+    def test_harness_time_directive(self):
+        codec = AnnotationCodec()
+        inst = codec.decode("# @harness.time")
+        self.assertIsInstance(inst, TimeRequest)
+
+        inst_now = codec.decode("# @harness.now")
+        self.assertIsInstance(inst_now, TimeRequest)
+
+        events_out = []
+        ctx = CoprocessorContext(
+            scheduler=HeapScheduler(),
+            emit_event=lambda ev: events_out.append(ev),
+        )
+        timer = TimerCoprocessor(ctx)
+        timer.handle_instruction(inst)
+
+        self.assertEqual(len(events_out), 1)
+        ev = events_out[0]
+        self.assertIsInstance(ev, TimeResult)
+        self.assertGreater(ev.epoch_ns, 0)
+        self.assertTrue(":" in ev.wall_time)
+
+        encoded = codec.encode(ev)
+        self.assertTrue(encoded.startswith("time "))
+        parts = encoded.strip().split()
+        self.assertEqual(len(parts), 4)  # time <epoch_ns> <wall_time> <mono_s>
 
 
 if __name__ == "__main__":

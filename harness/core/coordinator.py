@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 from harness.core.bus import EventBus
 from harness.core.engine import HarnessEngine
+from harness.core.logger import HarnessLogger
 
 
 class HarnessCoordinator:
@@ -18,10 +19,33 @@ class HarnessCoordinator:
     Provides a unified event loop, an in-memory event bus, and shared memory.
     """
 
-    def __init__(self, engines: Optional[List[HarnessEngine]] = None):
+    def __init__(
+        self,
+        engines: Optional[List[HarnessEngine]] = None,
+        log_level: Optional[str] = None,
+        log_target: Optional[str] = None,
+        log_format: Optional[str] = None,
+        logger: Optional[HarnessLogger] = None,
+    ):
         self.bus = EventBus()
         self.shared_variables: Dict[str, float] = {}
         self.engines: List[HarnessEngine] = []
+        self.log_level = log_level
+        self.log_target = log_target
+        self.log_format = log_format
+        self._owns_logger = logger is None and (
+            log_target is not None or log_format is not None or log_level is not None
+        )
+        self.logger = logger or (
+            HarnessLogger(
+                level=log_level,
+                target=log_target or ":stdout",
+                format=log_format or "text",
+                default_engine="coord",
+            )
+            if (log_target is not None or log_format is not None or log_level is not None)
+            else None
+        )
 
         if engines:
             for engine in engines:
@@ -33,6 +57,8 @@ class HarnessCoordinator:
             engine.bus = self.bus
         if not engine.shared_variables:
             engine.shared_variables = self.shared_variables
+        if self.logger is not None:
+            engine.logger = self.logger
         self.engines.append(engine)
 
     def spawn(
@@ -41,6 +67,7 @@ class HarnessCoordinator:
         name: str = "",
         attach_stdin: bool = True,
         show_directives: bool = False,
+        log_level: Optional[str] = None,
     ) -> HarnessEngine:
         """Factory helper creating and registering a new HarnessEngine."""
         engine = HarnessEngine(
@@ -48,6 +75,10 @@ class HarnessCoordinator:
             name=name,
             attach_stdin=attach_stdin,
             show_directives=show_directives,
+            log_level=log_level or self.log_level,
+            log_target=self.log_target,
+            log_format=self.log_format,
+            logger=self.logger,
             bus=self.bus,
             shared_variables=self.shared_variables,
         )
@@ -165,5 +196,8 @@ class HarnessCoordinator:
                 engine.drain_remaining()
                 code = engine.stop()
                 results[engine] = code
+
+            if self._owns_logger and self.logger is not None:
+                self.logger.close()
 
         return results

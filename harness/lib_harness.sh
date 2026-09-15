@@ -23,22 +23,28 @@ HARNESS_CYCLE=0
 HARNESS_SKIPPED=0
 HARNESS_LAG_MS=0.0
 HARNESS_STATUS=""
+HARNESS_SCHEDULED=""
+HARNESS_TAGS=""
 
 # ------------------------------------------------------------------------------
 # Clock Primitives (Control Plane - stdin/stdout)
 # ------------------------------------------------------------------------------
 
 # Initialize a periodic clock
-# Usage: harness_clock_init <id> <interval> [cycles] [policy]
+# Usage: harness_clock_init <id> <interval> [cycles] [policy] [align]
 harness_clock_init() {
     local id="$1"
     local interval="$2"
     local cycles="${3:-}"
     local policy="${4:-skip}"
+    local align="${5:-}"
 
     local cmd="# @harness.clock:init id=${id} interval=${interval} policy=${policy}"
     if [[ -n "$cycles" && "$cycles" != "0" ]]; then
         cmd="${cmd} cycles=${cycles}"
+    fi
+    if [[ -n "$align" ]]; then
+        cmd="${cmd} align=\"${align}\""
     fi
     echo "$cmd"
 }
@@ -100,6 +106,14 @@ harness_sleep() {
     read -r HARNESS_TAG HARNESS_ID
 }
 
+# Shift execution forward until next grid boundary (e.g. '*/1s', '*/1min')
+# Usage: harness_shift [to_expr]
+harness_shift() {
+    local to="${1:-*/1s}"
+    echo "# @harness.shift to=\"${to}\""
+    read -r HARNESS_TAG HARNESS_ID
+}
+
 # Register an interval stream to dedicated FD
 # Usage: harness_interval_stream <id> <interval> [on_fd]
 harness_interval_stream() {
@@ -114,6 +128,78 @@ harness_interval_stream() {
 harness_cancel() {
     local id="$1"
     echo "# @harness.timer:cancel id=${id}"
+}
+
+# ------------------------------------------------------------------------------
+# Schedule Primitives (Calendar / Agenda Orchestrator)
+# ------------------------------------------------------------------------------
+
+# Initialize a schedule
+# Usage: harness_schedule_init <id> [policy] [state_file]
+harness_schedule_init() {
+    local id="$1"
+    local policy="${2:-skip}"
+    local state_file="${3:-}"
+
+    local cmd="# @harness.schedule:init id=${id} policy=${policy}"
+    if [[ -n "$state_file" ]]; then
+        cmd="${cmd} state_file=\"${state_file}\""
+    fi
+    echo "$cmd"
+}
+
+# Attach a calendar / cron rule to a schedule
+# Usage: harness_schedule_rule <id> <expr> [tags]
+harness_schedule_rule() {
+    local id="$1"
+    local expr="$2"
+    local tags="${3:-}"
+
+    local cmd="# @harness.schedule:rule id=${id} expr=\"${expr}\""
+    if [[ -n "$tags" ]]; then
+        cmd="${cmd} tags=\"${tags}\""
+    fi
+    echo "$cmd"
+}
+
+# Synchronous wait for next scheduled occurrence
+# Usage: while harness_schedule_wait <id>; do ... done
+# Returns: 0 if occurrence fired or replayed, 1 on EOF / termination
+harness_schedule_wait() {
+    local id="$1"
+    echo "# @harness.schedule:wait id=${id}"
+
+    # Read positional response from control plane (stdin)
+    # Format: schedule <id> <scheduled_iso> <lag_ms> <tags> <status>
+    if ! read -r HARNESS_TAG HARNESS_ID HARNESS_SCHEDULED HARNESS_LAG_MS HARNESS_TAGS HARNESS_STATUS; then
+        return 1
+    fi
+
+    if [[ "$HARNESS_STATUS" == "no_rules" || "$HARNESS_STATUS" == "done" ]]; then
+        return 1
+    fi
+
+    return 0
+}
+
+# Dump schedule state snapshot to file
+# Usage: harness_schedule_dump <id> [file_path]
+harness_schedule_dump() {
+    local id="$1"
+    local file_path="${2:-}"
+
+    local cmd="# @harness.schedule:dump id=${id}"
+    if [[ -n "$file_path" ]]; then
+        cmd="${cmd} file=\"${file_path}\""
+    fi
+    echo "$cmd"
+}
+
+# Cancel a schedule
+# Usage: harness_schedule_cancel <id>
+harness_schedule_cancel() {
+    local id="$1"
+    echo "# @harness.schedule:cancel id=${id}"
 }
 
 # ------------------------------------------------------------------------------

@@ -27,13 +27,22 @@ from harness.core.model import (
     LegacyClock,
     LegacyTick,
     LogMessage,
+    ScheduleCancel,
+    ScheduleDump,
+    ScheduleEvent,
+    ScheduleInit,
+    ScheduleRule,
+    ScheduleWait,
     SetInterval,
     SetTimeout,
+    Shift,
     Sleep,
     SprintRequest,
     SprintResult,
     StartClock,
     Tick,
+    TimeRequest,
+    TimeResult,
     Timeout,
     UpdateClock,
     WaitClock,
@@ -94,17 +103,20 @@ class AnnotationCodec:
             cycles = int(kwargs.get("cycles", kwargs.get("n", 0)))
             duration = parse_duration(kwargs.get("duration", kwargs.get("timeout", 0.0)))
             policy = str(kwargs.get("policy", "skip"))
+            align = str(kwargs["align"]) if "align" in kwargs else None
             return InitClock(
                 clock_id=clock_id,
                 interval=interval,
                 cycles=cycles,
                 duration=duration,
                 policy=policy,
+                align=align,
             )
 
         elif cmd == "clock:start":
             clock_id = str(kwargs.get("id", "main"))
-            return StartClock(clock_id=clock_id)
+            align = str(kwargs.get("align", kwargs.get("at", ""))) or None
+            return StartClock(clock_id=clock_id, align=align)
 
         elif cmd == "clock:update":
             clock_id = str(kwargs.get("id", "main"))
@@ -136,7 +148,8 @@ class AnnotationCodec:
         elif cmd in ("clock:every", "clock:legacy", "clock"):
             interval = parse_duration(kwargs.get("interval", kwargs.get("every", 1.0)))
             cycles = int(kwargs.get("cycles", kwargs.get("n", 0)))
-            return LegacyClock(interval=interval, cycles=cycles)
+            align = str(kwargs["align"]) if "align" in kwargs else None
+            return LegacyClock(interval=interval, cycles=cycles, align=align)
 
         elif cmd == "timer:interval":
             timer_id = str(kwargs.get("id", "default"))
@@ -162,9 +175,38 @@ class AnnotationCodec:
             timer_id = str(kwargs.get("id", ""))
             return CancelTimer(timer_id=timer_id)
 
-        elif cmd == "sleep":
+        elif cmd in ("sleep", "timer:sleep"):
             duration = parse_duration(kwargs.get("duration", 0.0))
             return Sleep(duration=duration)
+
+        elif cmd in ("shift", "timer:shift"):
+            to = str(kwargs.get("to", kwargs.get("expr", kwargs.get("align", "*/1s"))))
+            return Shift(to=to)
+
+        elif cmd == "schedule:init":
+            schedule_id = str(kwargs.get("id", "default"))
+            policy = str(kwargs.get("policy", "skip"))
+            state_file = str(kwargs["state_file"]) if "state_file" in kwargs else None
+            return ScheduleInit(schedule_id=schedule_id, policy=policy, state_file=state_file)
+
+        elif cmd in ("schedule:rule", "schedule:at"):
+            schedule_id = str(kwargs.get("id", "default"))
+            expr = str(kwargs.get("expr", kwargs.get("cron", "* * * * * *")))
+            tags = str(kwargs.get("tags", kwargs.get("label", "")))
+            return ScheduleRule(schedule_id=schedule_id, expr=expr, tags=tags)
+
+        elif cmd == "schedule:wait":
+            schedule_id = str(kwargs.get("id", "default"))
+            return ScheduleWait(schedule_id=schedule_id)
+
+        elif cmd == "schedule:dump":
+            schedule_id = str(kwargs.get("id", "default"))
+            file_path = str(kwargs.get("file", kwargs.get("path", ""))) or None
+            return ScheduleDump(schedule_id=schedule_id, file_path=file_path)
+
+        elif cmd == "schedule:cancel":
+            schedule_id = str(kwargs.get("id", "default"))
+            return ScheduleCancel(schedule_id=schedule_id)
 
         elif cmd in ("calc:list", "calc:vars"):
             return CalcListRequest()
@@ -181,7 +223,8 @@ class AnnotationCodec:
         elif cmd == "filter:mask":
             pattern = str(kwargs.get("pattern", kwargs.get("regex", "")))
             replacement = str(kwargs.get("replacement", kwargs.get("replace", "[REDACTED]")))
-            return FilterMask(pattern=pattern, replacement=replacement)
+            name = str(kwargs["name"]) if "name" in kwargs else None
+            return FilterMask(pattern=pattern, replacement=replacement, name=name)
 
         elif cmd == "bus:subscribe":
             topic = str(kwargs.get("topic", kwargs.get("name", "*")))
@@ -197,10 +240,15 @@ class AnnotationCodec:
             level = str(kwargs.get("level", "INFO"))
             return LogMessage(text=text, level=level)
 
+        elif cmd in ("time", "now", "date"):
+            return TimeRequest()
+
         return None
 
     def encode(self, event: Event) -> str:
-        if isinstance(event, ClockWaitResult):
+        if isinstance(event, TimeResult):
+            return f"time {event.epoch_ns} {event.wall_time} {event.monotonic_s:.4f}\n"
+        elif isinstance(event, ClockWaitResult):
             return f"tick {event.clock_id} {event.cycle} {event.skipped} {event.lag_ms:.3f} {event.monotonic_ts:.4f} {event.status}\n"
         elif isinstance(event, ClockStatusResult):
             return f"clock:status {event.clock_id} {event.interval:.3f} {event.elapsed_s:.3f} {event.last_cycle} {event.max_cycles} {event.status}\n"
@@ -220,6 +268,8 @@ class AnnotationCodec:
             return "wakeup\n"
         elif isinstance(event, BusEvent):
             return f"bus:event {event.topic} {event.payload}\n"
+        elif isinstance(event, ScheduleEvent):
+            return f"schedule {event.schedule_id} {event.scheduled_iso} {event.lag_ms:.3f} {event.tags} {event.status}\n"
         elif isinstance(event, LegacyTick):
             return f"tick {event.cycle} {event.monotonic_ts:.4f}\n"
         return ""

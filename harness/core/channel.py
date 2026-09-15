@@ -3,6 +3,7 @@ channel.py - Transport Channels for the harness.
 FDChannel connects a subprocess stdout/stdin pipe using a Codec,
 and routes events to default stdout/stdin or designated extra FDs (e.g. FD 3).
 """
+from datetime import datetime
 import os
 import re
 import subprocess
@@ -10,8 +11,27 @@ import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
 from harness.core.codec import AnnotationCodec
-from harness.core.model import Event, FilterMask, Instruction, LogMessage
+from harness.core.logger import HarnessLogger
+from harness.core.model import Event, FilterMask, IORead, IOWrite, Instruction, LogMessage
 from harness.utils.pratt import interpolate_template
+
+
+def format_harness_log(
+    engine_name: str,
+    subsystem: str,
+    message: str,
+    action: Optional[str] = None,
+    fd: Optional[int] = None,
+) -> str:
+    """Standardized supervisor log line formatter matching # [HARNESS] specification."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    if action is not None and fd is not None:
+        tag = f"{subsystem}:{action:<5s} FD {fd}"
+    elif action is not None:
+        tag = f"{subsystem}:{action:<5s}"
+    else:
+        tag = subsystem
+    return f"\033[90m# [HARNESS] {ts} [{engine_name}] [{tag}] {message}\033[0m\n"
 
 
 class FDChannel:
@@ -24,6 +44,9 @@ class FDChannel:
         on_instruction_cb: Callable[[Instruction], None],
         extra_fds: Optional[Dict[int, int]] = None,
         show_directives: bool = False,
+        engine_name: str = "engine",
+        log_level: Optional[str] = None,
+        logger: Optional[HarnessLogger] = None,
         on_prompt_cb: Optional[Callable[[str], None]] = None,
         apply_filters: Optional[Callable[[str], Optional[str]]] = None,
     ):
@@ -32,10 +55,22 @@ class FDChannel:
         self.on_instruction = on_instruction_cb
         self.extra_fds = extra_fds or {}
         self.show_directives = show_directives
+        self.engine_name = engine_name
+        self.log_level = (log_level or ("all" if show_directives else None))
+        if self.log_level:
+            self.log_level = self.log_level.lower()
+        self.logger = logger or HarnessLogger(level=self.log_level, default_engine=self.engine_name)
         self.on_prompt = on_prompt_cb
         self._apply_filters = apply_filters
         self._read_buffer = ""
         self._filters: List[Tuple[re.Pattern, str]] = []
+
+    def is_log_enabled(self, level: str) -> bool:
+        """Returns True if the requested subsystem log level is active."""
+        if not self.log_level:
+            return False
+        levels = [l.strip().lower() for l in self.log_level.split(",")]
+        return level.lower() in levels or "all" in levels
 
     def fileno(self) -> int:
         assert self.proc.stdout is not None
@@ -70,9 +105,8 @@ class FDChannel:
             line = "# @harness." + harness_part
 
         inst = self.codec.decode(line)
-        if inst is not None and self.show_directives:
-            sys.stdout.write(f"\033[90m[HARNESS IN]  {line.strip()}\033[0m\n")
-            sys.stdout.flush()
+        if inst is not None and self.is_log_enabled("io"):
+            self.logger.log(IORead(fd=1, msg=line.strip()), engine=self.engine_name)
 
         if isinstance(inst, LogMessage):
             rendered = interpolate_template(inst.text)
@@ -132,11 +166,10 @@ class FDChannel:
         if not msg:
             return
 
-        if self.show_directives:
-            sys.stdout.write(f"\033[90m[HARNESS OUT] {msg.strip()}\033[0m\n")
-            sys.stdout.flush()
-
         target_fd = getattr(event, "target_fd", 0)
+        if self.is_log_enabled("io"):
+            self.logger.log(IOWrite(fd=target_fd, msg=msg.strip()), engine=self.engine_name)
+
         out_fd = None
         if target_fd in self.extra_fds:
             out_fd = self.extra_fds[target_fd]

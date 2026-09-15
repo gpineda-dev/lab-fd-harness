@@ -17,7 +17,52 @@ class CoprocessorContext:
     emit_event: Callable[[Event], None]
     variables: Dict[str, float] = field(default_factory=dict)
     bus: Optional[Any] = None  # Optional EventBus instance
+    engine_name: str = "engine"
+    log_level: Optional[str] = None
+    logger: Optional[Any] = None  # HarnessLogger instance
     _stdout_filters: Dict[str, Tuple[int, StreamFilter]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.logger is None:
+            from harness.core.logger import HarnessLogger
+            self.logger = HarnessLogger(level=self.log_level, default_engine=self.engine_name)
+
+    def is_log_enabled(self, level: str) -> bool:
+        """Returns True if the requested subsystem log level is active."""
+        if self.logger is not None:
+            return self.logger.is_enabled(level)
+        if not self.log_level:
+            return False
+        levels = [l.strip().lower() for l in self.log_level.split(",")]
+        return level.lower() in levels or "all" in levels
+
+    def log(
+        self,
+        record_or_subsystem: Any,
+        message: Optional[str] = None,
+        action: Optional[str] = None,
+        fd: Optional[int] = None,
+        target: Optional[Any] = None,
+    ) -> None:
+        """
+        Emits a structured log via domain model (.to_log() -> LogRecord)
+        or legacy positional arguments (subsystem, message, action, fd).
+        """
+        if message is not None or isinstance(record_or_subsystem, str):
+            if target is not None:
+                from harness.core.channel import format_harness_log
+                target.write(format_harness_log(self.engine_name, record_or_subsystem, message or "", action=action, fd=fd))
+                target.flush()
+            else:
+                self.logger.log_raw(
+                    subsystem=record_or_subsystem,
+                    message=message or "",
+                    action=action,
+                    fd=fd,
+                    engine=self.engine_name,
+                )
+        else:
+            self.logger.log(record_or_subsystem, engine=self.engine_name)
 
     def attach_stdout_filter(self, name: str, fn: StreamFilter, priority: int = 100) -> None:
         """

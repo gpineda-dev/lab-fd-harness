@@ -5,7 +5,7 @@ Treats the TOML file location as the Workspace root directory (Docker Compose st
 """
 from pathlib import Path
 import shlex
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 try:
     import tomllib
@@ -16,7 +16,13 @@ from harness.core.coordinator import HarnessCoordinator
 from harness.core.engine import HarnessEngine
 
 
-def load_coordinator_from_toml(config_target: Union[str, Path]) -> HarnessCoordinator:
+def load_coordinator_from_toml(
+    config_target: Union[str, Path],
+    show_directives: Optional[bool] = None,
+    log_level: Optional[str] = None,
+    log_target: Optional[str] = None,
+    log_format: Optional[str] = None,
+) -> HarnessCoordinator:
     """
     Parses a TOML file (or a workspace directory containing harness.toml)
     and initializes a HarnessCoordinator with configured engines.
@@ -47,9 +53,20 @@ def load_coordinator_from_toml(config_target: Union[str, Path]) -> HarnessCoordi
         data = tomllib.load(f)
 
     coordinator_section = data.get("coordinator", {})
-    global_show_directives = coordinator_section.get("show_directives", False)
+    toml_show_directives = coordinator_section.get("show_directives", False)
+    global_show_directives = show_directives if show_directives is not None else toml_show_directives
+    toml_log_level = coordinator_section.get("log_level", "io" if global_show_directives else None)
+    global_log_level = log_level if log_level is not None else toml_log_level
+    toml_log_target = coordinator_section.get("log_target", ":stdout")
+    global_log_target = log_target if log_target is not None else toml_log_target
+    toml_log_format = coordinator_section.get("log_format", "text")
+    global_log_format = log_format if log_format is not None else toml_log_format
 
-    coordinator = HarnessCoordinator()
+    coordinator = HarnessCoordinator(
+        log_level=global_log_level,
+        log_target=global_log_target,
+        log_format=global_log_format,
+    )
 
     engines_data = data.get("engines", [])
 
@@ -85,6 +102,7 @@ def load_coordinator_from_toml(config_target: Union[str, Path]) -> HarnessCoordi
         name = spec.get("name", cmd_list[0] if cmd_list else "engine")
         attach_stdin = spec.get("attach_stdin", False)
         show_directives = spec.get("show_directives", global_show_directives)
+        log_level = spec.get("log_level", global_log_level)
         # Custom cwd if specified, otherwise defaults to workspace_dir
         engine_cwd = spec.get("cwd", str(workspace_dir))
 
@@ -93,6 +111,7 @@ def load_coordinator_from_toml(config_target: Union[str, Path]) -> HarnessCoordi
             name=name,
             attach_stdin=attach_stdin,
             show_directives=show_directives,
+            log_level=log_level,
             cwd=engine_cwd,
             bus=coordinator.bus,
             shared_variables=coordinator.shared_variables,

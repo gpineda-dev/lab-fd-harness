@@ -44,10 +44,26 @@ def normalize_cli_args(args: List[str]) -> List[str]:
     # 3. Known options for supervisor subcommands
     if subcmd == "run":
         known_flags = {"-v", "--show-directives"}
-        known_options_with_arg = {"--strace"}
+        known_options_with_arg = {
+            "--strace",
+            "--log-level",
+            "--log-target",
+            "-t",
+            "--log-format",
+            "-f",
+        }
     else:  # redact
-        known_flags = {"--fail-on-leak", "--summary", "--no-summary"}
-        known_options_with_arg = {"--rules", "-r", "--mask", "-m"}
+        known_flags = {"-v", "--verbose", "--fail-on-leak", "--summary", "--no-summary"}
+        known_options_with_arg = {
+            "--rules",
+            "-r",
+            "--mask",
+            "-m",
+            "--log-target",
+            "-t",
+            "--log-format",
+            "-f",
+        }
 
     i = 0
     while i < len(sub_args):
@@ -110,6 +126,29 @@ def run_command(
             help="Print # @harness directives and protocol messages to terminal.",
         ),
     ] = False,
+    log_level: Annotated[
+        Optional[str],
+        typer.Option(
+            "--log-level",
+            help="Harness logging level (e.g. 'io', 'clock', 'all'). Defaults to 'all' when -v is enabled.",
+        ),
+    ] = None,
+    log_target: Annotated[
+        str,
+        typer.Option(
+            "--log-target",
+            "-t",
+            help="Harness log target: ':stdout', ':stderr', or a file path.",
+        ),
+    ] = ":stdout",
+    log_format: Annotated[
+        str,
+        typer.Option(
+            "--log-format",
+            "-f",
+            help="Harness log format: 'text' or 'jsonl'.",
+        ),
+    ] = "text",
 ):
     """
     Run a script or executable under the fd-harness supervisor.
@@ -121,6 +160,9 @@ def run_command(
         child_cmd=child_cmd,
         strace_file=strace_path,
         show_directives=show_directives,
+        log_level=log_level,
+        log_target=log_target,
+        log_format=log_format,
         attach_stdin=True,
     )
     code = engine.run()
@@ -145,13 +187,50 @@ def coordinate_command(
             readable=True,
         ),
     ] = Path("."),
+    show_directives: Annotated[
+        bool,
+        typer.Option(
+            "--show-directives",
+            "-v",
+            help="Print # @harness protocol trace messages.",
+        ),
+    ] = False,
+    log_level: Annotated[
+        Optional[str],
+        typer.Option(
+            "--log-level",
+            help="Harness logging level (e.g. 'io').",
+        ),
+    ] = None,
+    log_target: Annotated[
+        Optional[str],
+        typer.Option(
+            "--log-target",
+            "-t",
+            help="Harness log target: ':stdout', ':stderr', or a file path.",
+        ),
+    ] = None,
+    log_format: Annotated[
+        Optional[str],
+        typer.Option(
+            "--log-format",
+            "-f",
+            help="Harness log format: 'text' or 'jsonl'.",
+        ),
+    ] = None,
 ):
     """
     Run a multi-engine coordinated environment defined in a TOML file.
     Multiplexes file descriptors, schedulers, and in-memory event bus.
     """
     from harness.config import load_coordinator_from_toml
-    coordinator = load_coordinator_from_toml(target)
+    coordinator = load_coordinator_from_toml(
+        target,
+        show_directives=show_directives if show_directives else None,
+        log_level=log_level,
+        log_target=log_target,
+        log_format=log_format,
+    )
     results = coordinator.run()
     max_code = max(results.values()) if results else 0
     raise typer.Exit(code=max_code)
@@ -183,6 +262,26 @@ def redact_command(
         bool,
         typer.Option("--summary/--no-summary", help="Print audit summary to stderr upon completion."),
     ] = True,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Enable verbose real-time match alerts and rule inspection."),
+    ] = False,
+    log_target: Annotated[
+        str,
+        typer.Option(
+            "--log-target",
+            "-t",
+            help="Harness log target: ':stdout', ':stderr', or a file path.",
+        ),
+    ] = ":stdout",
+    log_format: Annotated[
+        str,
+        typer.Option(
+            "--log-format",
+            "-f",
+            help="Harness log format: 'text' or 'jsonl'.",
+        ),
+    ] = "text",
 ):
     """
     Sanitize secrets and sensitive tokens in real time from a piped stream or child process.
@@ -197,11 +296,15 @@ def redact_command(
 
     if mask:
         for m in mask:
-            if "=" in m:
+            rule_name = None
+            if ":" in m and "=" in m and m.index(":") < m.index("="):
+                rule_name, rest = m.split(":", 1)
+                pat, rep = rest.split("=", 1)
+            elif "=" in m:
                 pat, rep = m.split("=", 1)
-                instructions.append(FilterMask(pattern=pat, replacement=rep))
             else:
-                instructions.append(FilterMask(pattern=m, replacement="[REDACTED]"))
+                pat, rep = m, "[REDACTED]"
+            instructions.append(FilterMask(pattern=pat, replacement=rep, name=rule_name))
 
     effective_fail_on_leak = fail_on_leak or toml_fail
     effective_summary = summary and toml_summary
@@ -212,27 +315,56 @@ def redact_command(
             child_cmd=cmd_list,
             initial_instructions=instructions,
             redirect_stderr=True,
+            log_level="dlp" if verbose else None,
+            log_target=log_target,
+            log_format=log_format,
         )
-        code = engine.run()
+        engine.start()
         dlp = engine.router.get_coprocessor(DlpCoprocessor) if engine.router else None
         if dlp:
             dlp.fail_on_leak = effective_fail_on_leak
             dlp.print_summary = effective_summary
+            dlp.verbose = verbose
+            if verbose:
+                dlp.emit_startup_info()
+
+        from harness.core.coordinator import HarnessCoordinator
+        coordinator = HarnessCoordinator([engine])
+        results = coordinator.run()
+        code = results.get(engine, 0)
+        if dlp:
             dlp.emit_audit_summary()
             if effective_fail_on_leak and dlp.total_leaks > 0:
                 raise typer.Exit(code=1)
         raise typer.Exit(code=code)
     else:
         # Pipe mode: read from sys.stdin
-        ctx_coproc = CoprocessorContext(scheduler=HeapScheduler(), emit_event=lambda ev: None)
+        from harness.core.logger import HarnessLogger
+        logger = HarnessLogger(
+            level="dlp" if verbose else None,
+            target=log_target,
+            format=log_format,
+            default_engine="stdin",
+        )
+        ctx_coproc = CoprocessorContext(
+            scheduler=HeapScheduler(),
+            emit_event=lambda ev: None,
+            engine_name="stdin",
+            log_level="dlp" if verbose else None,
+            logger=logger,
+        )
         router = CoprocessorRouter(coprocessor_registry, ctx_coproc)
-        for inst in instructions:
-            router.handle_instruction(inst)
-
         dlp = router.get_coprocessor(DlpCoprocessor)
         if dlp:
             dlp.fail_on_leak = effective_fail_on_leak
             dlp.print_summary = effective_summary
+            dlp.verbose = verbose
+
+        for inst in instructions:
+            router.handle_instruction(inst)
+
+        if dlp and verbose:
+            dlp.emit_startup_info()
 
         for line in sys.stdin:
             sanitized = ctx_coproc.apply_stream_filters(line)
@@ -242,8 +374,11 @@ def redact_command(
 
         if dlp:
             dlp.emit_audit_summary()
-            if effective_fail_on_leak and dlp.total_leaks > 0:
-                raise typer.Exit(code=1)
+
+        logger.close()
+
+        if dlp and effective_fail_on_leak and dlp.total_leaks > 0:
+            raise typer.Exit(code=1)
         raise typer.Exit(code=0)
 
 
