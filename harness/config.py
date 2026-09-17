@@ -105,6 +105,10 @@ def load_coordinator_from_toml(
         log_level = spec.get("log_level", global_log_level)
         # Custom cwd if specified, otherwise defaults to workspace_dir
         engine_cwd = spec.get("cwd", str(workspace_dir))
+        user = spec.get("user", spec.get("run_as"))
+        group = spec.get("group")
+        extra_groups = spec.get("extra_groups")
+        umask = spec.get("umask")
 
         engine = HarnessEngine(
             child_cmd=cmd_list,
@@ -115,6 +119,10 @@ def load_coordinator_from_toml(
             cwd=engine_cwd,
             bus=coordinator.bus,
             shared_variables=coordinator.shared_variables,
+            user=user,
+            group=group,
+            extra_groups=extra_groups,
+            umask=umask,
         )
         coordinator.add_engine(engine)
 

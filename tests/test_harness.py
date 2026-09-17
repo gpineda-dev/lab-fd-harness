@@ -6,6 +6,7 @@ import unittest
 
 from harness.coproc import (
     BaseCoprocessor,
+    BiMapVault,
     CoprocessorContext,
     DlpCoprocessor,
     TimerCoprocessor,
@@ -15,6 +16,7 @@ from harness.coproc import (
 from harness.core import (
     AnnotationCodec,
     CoprocessorRouter,
+    FilterMask,
     HeapScheduler,
     MemoryChannel,
 )
@@ -613,6 +615,13 @@ class TestHarness(unittest.TestCase):
             ["run", "--log-level", "io", "--", "./script.sh", "--foo"],
         )
 
+        # 8. dlp redact normalization
+        args8 = ["dlp", "redact", "-r", "rules.toml", "cat", "input.txt"]
+        self.assertEqual(
+            normalize_cli_args(args8),
+            ["dlp", "redact", "-r", "rules.toml", "--", "cat", "input.txt"],
+        )
+
     def test_io_trace_log_format(self):
         import io
         import sys
@@ -1129,6 +1138,227 @@ class TestHarness(unittest.TestCase):
         self.assertTrue(encoded.startswith("time "))
         parts = encoded.strip().split()
         self.assertEqual(len(parts), 4)  # time <epoch_ns> <wall_time> <mono_s>
+
+    def test_dlp_action_mask_templates_and_capture_groups(self):
+        ctx = CoprocessorContext(scheduler=HeapScheduler(), emit_event=lambda ev: None)
+        dlp = DlpCoprocessor(ctx)
+        # Capture group and template with named group
+        dlp.add_rule(
+            pattern=r"user:(?P<uname>[a-zA-Z0-9]+)",
+            action="mask",
+            template="user:[REDACTED-{uname}]",
+            name="user-mask",
+        )
+        out = ctx.apply_stream_filters("Logged in as user:alice and user:bob\n")
+        self.assertEqual(out, "Logged in as user:[REDACTED-alice] and user:[REDACTED-bob]\n")
+
+    def test_dlp_action_hash_deterministic_hmac(self):
+        ctx = CoprocessorContext(scheduler=HeapScheduler(), emit_event=lambda ev: None)
+        dlp = DlpCoprocessor(ctx, salt="secret-salt-xyz")
+        dlp.add_rule(
+            pattern=r"sk_live_[0-9a-zA-Z]{8}",
+            action="hash",
+            template="sk_live_{hash:8}",
+            name="api-key",
+        )
+        line1 = ctx.apply_stream_filters("Auth key: sk_live_ABCDEF12\n")
+        line2 = ctx.apply_stream_filters("Auth key: sk_live_ABCDEF12\n")
+        line3 = ctx.apply_stream_filters("Auth key: sk_live_99999999\n")
+
+        self.assertEqual(line1, line2)  # Deterministic hash
+        self.assertNotEqual(line1, line3)
+        self.assertTrue(line1.startswith("Auth key: sk_live_"))
+        self.assertNotIn("ABCDEF12", line1)
+
+    def test_dlp_action_alias_bimap_and_sequence_counters(self):
+        import json
+        import tempfile
+
+        ctx = CoprocessorContext(scheduler=HeapScheduler(), emit_event=lambda ev: None)
+        dlp = DlpCoprocessor(ctx)
+
+        # 2 rules with different counter namespaces
+        dlp.add_rule(
+            pattern=r"CUST-\d{4}",
+            action="alias",
+            template="client_{seq.cust:03d}",
+            name="customer",
+        )
+        dlp.add_rule(
+            pattern=r"IP:10\.0\.0\.\d+",
+            action="alias",
+            template="IP:internal_{seq.ip:02d}",
+            name="ip-addr",
+        )
+
+        # Line 1: first discovery of CUST-1001 and IP:10.0.0.5
+        l1 = ctx.apply_stream_filters("Connect CUST-1001 via IP:10.0.0.5\n")
+        self.assertEqual(l1, "Connect client_001 via IP:internal_01\n")
+
+        # Line 2: discovery of new CUST-2002, same IP:10.0.0.5
+        l2 = ctx.apply_stream_filters("Connect CUST-2002 via IP:10.0.0.5\n")
+        self.assertEqual(l2, "Connect client_002 via IP:internal_01\n")
+
+        # Line 3: recurrence of CUST-1001 -> cache hit, preserves client_001
+        l3 = ctx.apply_stream_filters("Disconnect CUST-1001\n")
+        self.assertEqual(l3, "Disconnect client_001\n")
+
+        # Verify BiMap reversibility
+        reconstructed_l1 = dlp.vault.unmask_line(l1)
+        self.assertEqual(reconstructed_l1, "Connect CUST-1001 via IP:10.0.0.5\n")
+        reconstructed_l2 = dlp.vault.unmask_line(l2)
+        self.assertEqual(reconstructed_l2, "Connect CUST-2002 via IP:10.0.0.5\n")
+
+        # Verify Vault JSONL (WAL) and JSON Serialization round-trip
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
+            vault_jsonl_file = tf.name
+
+        dlp.vault.save_file(vault_jsonl_file)
+        loaded_vault_jsonl = BiMapVault.load_file(vault_jsonl_file)
+        self.assertEqual(loaded_vault_jsonl.unmask_line(l1), "Connect CUST-1001 via IP:10.0.0.5\n")
+        self.assertEqual(loaded_vault_jsonl.forward["CUST-1001"], "client_001")
+        self.assertEqual(loaded_vault_jsonl.reverse["client_001"], "CUST-1001")
+        self.assertEqual(loaded_vault_jsonl.counters["cust"], 2)
+        self.assertEqual(loaded_vault_jsonl.counters["ip"], 1)
+
+        # Verify JSON dictionary round-trip
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf2:
+            vault_json_file = tf2.name
+
+        dlp.vault.save_file(vault_json_file)
+        loaded_vault_json = BiMapVault.load_file(vault_json_file)
+        self.assertEqual(loaded_vault_json.unmask_line(l1), "Connect CUST-1001 via IP:10.0.0.5\n")
+        self.assertEqual(loaded_vault_json.forward["CUST-1001"], "client_001")
+        self.assertEqual(loaded_vault_json.reverse["client_001"], "CUST-1001")
+
+    def test_dlp_inband_directive_alias(self):
+        codec = AnnotationCodec()
+        inst = codec.decode('# @harness.filter:mask pattern="user_[0-9]+" action="alias" template="u_{seq:02d}" name="usr"')
+        self.assertIsInstance(inst, FilterMask)
+        self.assertEqual(inst.action, "alias")
+        self.assertEqual(inst.template, "u_{seq:02d}")
+
+        ctx = CoprocessorContext(scheduler=HeapScheduler(), emit_event=lambda ev: None)
+        dlp = DlpCoprocessor(ctx)
+        dlp.handle_instruction(inst)
+
+        out1 = ctx.apply_stream_filters("Hello user_42\n")
+        out2 = ctx.apply_stream_filters("Goodbye user_42 and user_99\n")
+        self.assertEqual(out1, "Hello u_01\n")
+        self.assertEqual(out2, "Goodbye u_01 and u_02\n")
+
+    def test_dlp_toml_configuration_loading(self):
+        import tempfile
+        from harness.coproc.dlp import load_dlp_config
+
+        toml_content = """
+[dlp]
+fail_on_leak = true
+summary = false
+vault_file = "custom_vault.json"
+salt = "my-custom-salt"
+
+[[rules]]
+name = "customer-id"
+pattern = 'CUST-\\d{4}'
+action = "alias"
+template = "client_{seq.cust:03d}"
+
+[[rules]]
+name = "api-token"
+pattern = 'tok_[0-9a-z]{8}'
+action = "hash"
+template = "tok_{hash:6}"
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as tf:
+            tf.write(toml_content)
+            toml_path = tf.name
+
+        instructions, fail_on_leak, summary, vault_file, salt = load_dlp_config(toml_path)
+        self.assertTrue(fail_on_leak)
+        self.assertFalse(summary)
+        self.assertEqual(vault_file, "custom_vault.json")
+        self.assertEqual(salt, "my-custom-salt")
+        self.assertEqual(len(instructions), 2)
+        self.assertEqual(instructions[0].name, "customer-id")
+        self.assertEqual(instructions[0].action, "alias")
+        self.assertEqual(instructions[0].template, "client_{seq.cust:03d}")
+        self.assertEqual(instructions[1].name, "api-token")
+        self.assertEqual(instructions[1].action, "hash")
+        self.assertEqual(instructions[1].template, "tok_{hash:6}")
+
+    def test_engine_user_group_umask_resolution(self):
+        from harness.core.engine import HarnessEngine
+
+        # 1. Compact user:group syntax
+        e1 = HarnessEngine(child_cmd=["echo", "hi"], user="nobody:nogroup", umask="027")
+        self.assertEqual(e1.user, "nobody")
+        self.assertEqual(e1.group, "nogroup")
+        self.assertEqual(e1.umask, 0o027)
+
+        # 2. Separate user and group with integer umask
+        e2 = HarnessEngine(child_cmd=["echo", "hi"], user="alice", group="staff", umask=0o022)
+        self.assertEqual(e2.user, "alice")
+        self.assertEqual(e2.group, "staff")
+        self.assertEqual(e2.umask, 0o022)
+
+    def test_coordinator_toml_user_group_umask(self):
+        import tempfile
+        from harness.config import load_coordinator_from_toml
+
+        toml_content = """
+[coordinator]
+name = "secure-stack"
+
+[[engines]]
+name = "worker1"
+command = "echo hello"
+user = "nobody"
+group = "nogroup"
+umask = "027"
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as tf:
+            tf.write(toml_content)
+            toml_path = tf.name
+
+        coord = load_coordinator_from_toml(toml_path)
+        self.assertEqual(len(coord.engines), 1)
+        engine = coord.engines[0]
+        self.assertEqual(engine.name, "worker1")
+        self.assertEqual(engine.user, "nobody")
+        self.assertEqual(engine.group, "nogroup")
+        self.assertEqual(engine.umask, 0o027)
+
+    def test_cli_normalization_user_and_umask(self):
+        from harness.cli import normalize_cli_args
+
+        # 1. run command
+        args1 = ["run", "-u", "nobody", "-g", "nogroup", "--umask", "027", "./script.sh", "-v"]
+        self.assertEqual(
+            normalize_cli_args(args1),
+            ["run", "-u", "nobody", "-g", "nogroup", "--umask", "027", "--", "./script.sh", "-v"],
+        )
+
+        # 2. dlp redact command
+        args2 = ["dlp", "redact", "-u", "nobody", "-g", "nogroup", "--umask", "027", "-r", "rules.toml", "./server.sh", "--port", "8080"]
+        self.assertEqual(
+            normalize_cli_args(args2),
+            ["dlp", "redact", "-u", "nobody", "-g", "nogroup", "--umask", "027", "-r", "rules.toml", "--", "./server.sh", "--port", "8080"],
+        )
+
+    def test_argparse_cli_dlp_redact_user_group_umask(self):
+        from unittest.mock import patch
+        from harness.cli import run_argparse_cli
+
+        with patch("harness.cli.execute_redact") as mock_exec:
+            mock_exec.return_value = 0
+            run_argparse_cli(["dlp", "redact", "-u", "nobody:nogroup", "-g", "nogroup", "--umask", "027", "-r", "rules.toml", "echo", "test"])
+            self.assertTrue(mock_exec.called)
+            kwargs = mock_exec.call_args[1]
+            self.assertEqual(kwargs["user"], "nobody:nogroup")
+            self.assertEqual(kwargs["group"], "nogroup")
+            self.assertEqual(kwargs["umask"], "027")
+            self.assertEqual(kwargs["command_args"], ["echo", "test"])
 
 
 if __name__ == "__main__":

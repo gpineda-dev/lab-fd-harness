@@ -1,26 +1,48 @@
 # samples/11-redact/dlp-rules.toml
-# Data Loss Prevention (DLP) masking rules for fd-harness redact
+# Multi-action DLP configuration for fd-harness redact
+# Showcases: mask (destructive), hash (HMAC salted), alias (stateful BiMap)
 
 [dlp]
 fail_on_leak = false
 summary = true
+vault_file = "samples/11-redact/vault.jsonl"
+salt = "demo-vault-salt-42"
 
+# 1. Action: alias (Stateful BiMap Pseudonymization with sequence counters)
+[[rules]]
+name = "customer-id"
+pattern = 'CUST-\d{4}'
+action = "alias"
+template = "client_{seq.cust:03d}"
+
+[[rules]]
+name = "internal-ip"
+pattern = '10\.0\.0\.\d+'
+action = "alias"
+template = "internal_ip_{seq.ip:02d}"
+
+# 2. Action: hash (Deterministic Salted HMAC-SHA256)
 [[rules]]
 name = "github-pat"
 pattern = 'ghp_[A-Za-z0-9_]{36}'
-replacement = "[REDACTED_GH_TOKEN]"
-
-[[rules]]
-name = "jwt"
-pattern = 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
-replacement = "[REDACTED_JWT_TOKEN]"
+action = "hash"
+template = "ghp_{hash:8}"
 
 [[rules]]
 name = "aws-key"
 pattern = 'AKIA[0-9A-Z]{16}'
-replacement = "[REDACTED_AWS_KEY]"
+action = "hash"
+template = "AKIA_{hash:8}"
 
+# 3. Action: mask (Destructive Redaction with template/capture groups)
 [[rules]]
 name = "bearer-auth"
 pattern = '(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._~+/-]+'
+action = "mask"
 replacement = "Authorization: Bearer [REDACTED_BEARER]"
+
+[[rules]]
+name = "jwt"
+pattern = 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+action = "mask"
+replacement = "[REDACTED_JWT_TOKEN]"

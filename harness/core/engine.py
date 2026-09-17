@@ -5,7 +5,7 @@ Encapsulates process lifecycle, file descriptor plumbing, scheduler, and coproce
 import os
 from pathlib import Path
 import subprocess
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from harness.coproc import CoprocessorContext, CoprocessorRegistry, coprocessor_registry
 from harness.core.bus import EventBus
@@ -42,6 +42,10 @@ class HarnessEngine:
         registry: Optional[CoprocessorRegistry] = None,
         initial_instructions: Optional[List[Instruction]] = None,
         redirect_stderr: bool = False,
+        user: Optional[Union[str, int]] = None,
+        group: Optional[Union[str, int]] = None,
+        extra_groups: Optional[List[Union[str, int]]] = None,
+        umask: Optional[Union[str, int]] = None,
     ):
         self.child_cmd = child_cmd
         self.name = name or (Path(child_cmd[0]).name if child_cmd else "engine")
@@ -63,6 +67,26 @@ class HarnessEngine:
         self.cwd = cwd
         self.initial_instructions = initial_instructions or []
         self.redirect_stderr = redirect_stderr
+
+        # Resolve user:group compact notation if provided
+        if isinstance(user, str) and ":" in user and group is None:
+            u_part, g_part = user.split(":", 1)
+            self.user: Optional[Union[str, int]] = u_part
+            self.group: Optional[Union[str, int]] = g_part
+        else:
+            self.user = user
+            self.group = group
+
+        self.extra_groups = extra_groups
+
+        # Parse octal umask if provided as string
+        if isinstance(umask, str):
+            try:
+                self.umask: Optional[int] = int(umask, 8)
+            except ValueError:
+                self.umask = int(umask)
+        else:
+            self.umask = umask
 
         self.scheduler = scheduler or HeapScheduler()
         self.codec = AnnotationCodec()
@@ -103,6 +127,16 @@ class HarnessEngine:
         child_env["HARNESS_ACTIVE"] = "1"
         child_env["HARNESS_ENGINE"] = self.name
 
+        popen_kwargs: Dict[str, Any] = {}
+        if self.user is not None:
+            popen_kwargs["user"] = self.user
+        if self.group is not None:
+            popen_kwargs["group"] = self.group
+        if self.extra_groups is not None:
+            popen_kwargs["extra_groups"] = self.extra_groups
+        if self.umask is not None:
+            popen_kwargs["umask"] = self.umask
+
         try:
             self.proc = subprocess.Popen(
                 cmd,
@@ -114,6 +148,7 @@ class HarnessEngine:
                 bufsize=0,    # Unbuffered raw bytes
                 pass_fds=[3, 4, event_r, user_r],
                 preexec_fn=preexec,
+                **popen_kwargs,
             )
         finally:
             # Parent closes the read ends; only child uses them

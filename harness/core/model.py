@@ -321,6 +321,7 @@ class DlpMutate:
     rule: str
     token: str
     replacement: str
+    action: str = "mask"
 
     def to_log(self) -> LogRecord:
         return LogRecord(
@@ -330,8 +331,9 @@ class DlpMutate:
                 "rule": self.rule,
                 "token": self.token,
                 "replacement": self.replacement,
+                "action": self.action,
             },
-            text=f"line={self.line} rule={self.rule} token={self.token} -> {self.replacement}",
+            text=f"line={self.line} rule={self.rule} action={self.action} token={self.token} -> {self.replacement}",
         )
 
 
@@ -593,8 +595,11 @@ class SprintRequest(Instruction):
 @dataclass(frozen=True)
 class FilterMask(Instruction):
     pattern: str
-    replacement: str = "[REDACTED]"
+    replacement: Optional[str] = None
     name: Optional[str] = None
+    action: str = "mask"  # "mask", "hash", "alias"
+    template: Optional[str] = None
+    salt: Optional[str] = None
 
 
 @dataclass(frozen=True)

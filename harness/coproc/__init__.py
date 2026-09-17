@@ -6,7 +6,7 @@ from harness.coproc.registry import CoprocessorRegistry, coprocessor_registry, r
 
 # Import modules to trigger decorator auto-registration
 from harness.coproc import timer, calc, sprint, bus, dlp
-from harness.coproc.dlp import DlpCoprocessor
+from harness.coproc.dlp import BiMapVault, DlpCoprocessor, DlpRule
 from harness.coproc.timer import ClockState, TimerCoprocessor
 
 __all__ = [
@@ -18,4 +18,6 @@ __all__ = [
     "ClockState",
     "TimerCoprocessor",
     "DlpCoprocessor",
+    "BiMapVault",
+    "DlpRule",
 ]

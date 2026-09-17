@@ -222,9 +222,19 @@ class AnnotationCodec:
 
         elif cmd == "filter:mask":
             pattern = str(kwargs.get("pattern", kwargs.get("regex", "")))
-            replacement = str(kwargs.get("replacement", kwargs.get("replace", "[REDACTED]")))
+            action = str(kwargs.get("action", "mask"))
+            template = kwargs.get("template")
+            replacement = kwargs.get("replacement", kwargs.get("replace"))
             name = str(kwargs["name"]) if "name" in kwargs else None
-            return FilterMask(pattern=pattern, replacement=replacement, name=name)
+            salt = str(kwargs["salt"]) if "salt" in kwargs else None
+            return FilterMask(
+                pattern=pattern,
+                replacement=str(replacement) if replacement is not None else None,
+                name=name,
+                action=action,
+                template=str(template) if template is not None else None,
+                salt=salt,
+            )
 
         elif cmd == "bus:subscribe":
             topic = str(kwargs.get("topic", kwargs.get("name", "*")))

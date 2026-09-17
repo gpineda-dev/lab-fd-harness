@@ -1,21 +1,57 @@
 #!/usr/bin/env bash
-# run-demo.sh - Demonstrates both command-wrapping and pipe modes of fd-harness redact
+# run-demo.sh - Comprehensive demo for enriched DLP (fd-harness dlp redact, fd-harness dlp unmask)
 
+set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHONPATH="$(cd "$DIR/../.." && pwd)"
+export PYTHONPATH
 
-echo "========================================================="
-echo "Mode 1: Command Wrapping (Intercepting 'cat' stdout/stderr)"
-echo "========================================================="
-uv run fd-harness redact --rules "$DIR/dlp-rules.toml" -- cat "$DIR/demo-server-logs.txt"
+VAULT_FILE="$DIR/vault.jsonl"
+rm -f "$VAULT_FILE"
+
+echo "========================================================================"
+echo "1. Stream Sanitization via 'fd-harness dlp redact' (alias, hash, mask)"
+echo "========================================================================"
+python3 -m harness.cli dlp redact --rules "$DIR/dlp-rules.toml" --vault "$VAULT_FILE" < "$DIR/demo-server-logs.txt" > "$DIR/sanitized.log"
 
 echo ""
-echo "========================================================="
-echo "Mode 2: Standard Unix Pipe ('cat ... | fd-harness redact')"
-echo "========================================================="
-cat "$DIR/demo-server-logs.txt" | uv run fd-harness redact --rules "$DIR/dlp-rules.toml"
+echo "--- Sanitized Output (sanitized.log) ---"
+cat "$DIR/sanitized.log"
 
 echo ""
-echo "========================================================="
-echo "Mode 3: Ad-hoc CLI rule without TOML file (--mask)"
-echo "========================================================="
-echo "My internal secret is SECRET-998811-XYZ" | uv run fd-harness redact -m 'SECRET-[0-9]+-[A-Z]+=[SHIELDED]'
+echo "========================================================================"
+echo "2. Generated BiMap Vault (vault.jsonl - Append-Only WAL without redundancy)"
+echo "========================================================================"
+cat "$VAULT_FILE"
+echo ""
+
+echo ""
+echo "========================================================================"
+echo "3. Reversible Unmasking in Secured Enclave via 'fd-harness dlp unmask'"
+echo "========================================================================"
+python3 -m harness.cli dlp unmask --vault "$VAULT_FILE" "$DIR/sanitized.log" > "$DIR/restored.log"
+
+echo "--- Restored Output (restored.log) ---"
+cat "$DIR/restored.log"
+
+echo ""
+echo "--- Diff between Original and Restored (aliases restored loss-free) ---"
+diff -u "$DIR/demo-server-logs.txt" "$DIR/restored.log" || true
+echo "Note: mask & hash are one-way (unmasked as-is), while alias rules (CUST-*, 10.0.0.*) are 100% restored!"
+
+echo ""
+echo "========================================================================"
+echo "4. Dynamic In-Band Redaction Directive (# @harness.filter:mask)"
+echo "========================================================================"
+cat << 'EOF' | python3 -m harness.cli dlp redact
+# @harness.filter:mask pattern="worker-[0-9]+" action="alias" template="srv_{seq.node:02d}" name="node"
+Starting job on worker-99
+Connecting to database from worker-99
+Spawning secondary task on worker-12
+Worker worker-99 task finished cleanly
+EOF
+
+# Clean up temp outputs
+rm -f "$DIR/sanitized.log" "$DIR/restored.log" "$VAULT_FILE"
+echo ""
+echo "Demo finished successfully."

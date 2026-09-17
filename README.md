@@ -1,93 +1,252 @@
 # fd-harness
 
+> **Stream Interposition Microkernel & Coprocessor Supervisor for Unix File Descriptors**
 
+`fd-harness` is a lightweight, zero-dependency process supervisor that interposes itself between the outer environment and one or more supervised child processes. 
 
-## Getting started
+By treating standard file descriptors (`stdin`, `stdout`, `stderr`) as a bidirectional, reactive communication channel, `fd-harness` enables **real-time in-flight stream mutation**, **in-band IPC through log annotations**, and **specialized coprocessor routing** without requiring external SDKs, sidecars, or source code modifications.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+---
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## The Mental Model
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/gpineda-dev-labs/fd-harness.git
-git branch -M main
-git push -uf origin main
+ [ External World (Terminal, Upstream Pipes, Log Sinks) ]
+         ▲                               │
+  stdout │ (Filtered / Mutated)    stdin │ (Forwarded / Injected)
+         │                               ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │                   fd-harness Supervisor                       │
+ │                                                               │
+ │   ┌───────────────────────────────────────────────────────┐   │
+ │   │               HarnessEngine (Instance N)              │   │
+ │   │                                                       │   │
+ │   │   ┌───────────────────────────────────────────────┐   │   │
+ │   │   │     Stream Interceptor & Mutation Layer       │   │   │
+ │   │   │                                               │   │   │
+ │   │   │  • Intercepts in-band annotations (# @harness)│   │   │
+ │   │   │  • Applies live stream mutations on stdout    │   │   │
+ │   │   └───────────────────────▲───────────────────────┘   │   │
+ │   │                           │                           │   │
+ │   │                 [ CoprocessorRouter ]                 │   │
+ │   │                  ├── DlpCoprocessor (Sanitizer)       │   │
+ │   │                  ├── TimerCoprocessor (Virtual Clock) │   │
+ │   │                  └── ... (Custom Coprocessors)        │   │
+ │   └───────────────────────────┬───────────────────────────┘   │
+ └───────────────────────────────┼───────────────────────────────┘
+                                 │ Process IPC (stdin / stdout)
+                                 ▼
+               [ Supervised Child Process (Script/Binary) ]
 ```
 
-## Integrate with your tools
+### How It Works
 
-* [Set up project integrations](https://gitlab.com/gpineda-dev-labs/fd-harness/-/settings/integrations)
+1. **$N \times$ `HarnessEngine` Execution**:
+   - Starts and supervises target scripts/binaries as child subprocesses.
+   - Manages POSIX signal propagation, exit codes, and native privilege dropping (`user`, `group`, `umask`).
+2. **Stream Interposition & Mutation**:
+   - Sits between the child's `stdout`/`stderr` and the external output.
+   - Any registered coprocessor can dynamically mutate, mask, alias, or suppress lines in real time before they reach the outside world.
+3. **In-Band Annotation Protocol (IPC)**:
+   - Supervised applications communicate with the harness simply by printing structured comments to stdout (e.g. `print('# @harness.clock:init id=main interval=1.0')`).
+   - The harness strips these control directives so they never leak downstream, decodes their intentions, and routes them to the appropriate coprocessor.
+4. **Coprocessor Dispatch**:
+   - The `CoprocessorRouter` directs each annotation to its domain coprocessor (`TimerCoprocessor`, `DlpCoprocessor`, etc.).
+   - Coprocessors can mutate streams, maintain internal state machines, or write synthetic events back into the child's `stdin`.
+5. **Specialized "Golden Path" Workloads**:
+   - For standalone operational tasks (such as Data Loss Prevention / sanitization), `fd-harness` provides dedicated commands that **pre-inject instructions at startup**.
+   - The target application does not need to emit any annotations; the harness wraps it and applies the sanitization rules transparently.
 
-## Collaborate with your team
+---
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+## The Three Operating Modes
 
-## Test and Deploy
+### 1. In-Band Protocol Mode (`fd-harness run`)
 
-Use the built-in continuous integration in GitLab.
+Supervises a process that actively controls the harness via structured `# @harness` annotations in its logs.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+```bash
+# Supervise a target script with directive tracing
+fd-harness run -v ./worker.py
 
-***
+# Drop privileges to nobody:nogroup with restricted umask
+fd-harness run -u nobody:nogroup --umask 027 ./worker.py
+```
 
-# Editing this README
+**How an application controls the harness from code (zero SDK):**
+```python
+import sys, time
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+# 1. Initialize a virtual timer coprocessor
+print("# @harness.clock:init id=tick interval=1.0 cycles=5", flush=True)
 
-## Suggestions for a good README
+# 2. Dynamically register a live stream masking rule
+print('# @harness.filter:mask pattern="API_KEY_[0-9A-Z]+" action="hash" template="key_{hash:6}"', flush=True)
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+# 3. Regular application output (will be sanitized in flight)
+print("Connected with secret API_KEY_9948AB12C", flush=True)
+# Outside world sees: Connected with secret key_f4a1c0
+```
 
-## Name
-Choose a self-explaining name for your project.
+---
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+### 2. Multi-Engine Topology (`fd-harness coord`)
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+Coordinates multiple independent `HarnessEngine` instances defined declaratively in a single `harness.toml` file.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+fd-harness coord ./path/to/workspace/
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+**Example `harness.toml`:**
+```toml
+[coordinator]
+name = "data-mesh"
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+[[engines]]
+name = "ingest-worker"
+command = "python3 ingest.py"
+user = "nobody"
+group = "nogroup"
+umask = "027"
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+[[engines]]
+name = "processor"
+command = "./processor-bin"
+show_directives = true
+log_target = "processor.log"
+log_format = "jsonl"
+```
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+---
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+### 3. Golden Path: Streaming DLP & Pseudonymization (`fd-harness dlp`)
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+A specialized domain workflow where the harness pre-injects masking and pseudonymization instructions directly into the engine, requiring zero in-band directives or code changes from the supervised command.
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+#### A. Process Wrapper Mode (Supervision & Privilege Dropping)
+```bash
+fd-harness dlp redact \
+  -r dlp-rules.toml \
+  -V vault.jsonl \
+  -u nobody:nogroup \
+  --umask 027 \
+  -- ./server.sh --port 8080
+```
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+#### B. Unix Pipeline Mode (Streaming `stdin` $\to$ `stdout`)
+```bash
+zstdcat production-logs.zst | fd-harness dlp redact -r dlp-rules.toml -V vault.jsonl > sanitized.log
+```
 
-## License
-For open source projects, say how it is licensed.
+#### C. Deterministic Reverse Unmasking
+Reconstruct original values from pseudonymized outputs using the non-redundant BiMap vault:
+```bash
+fd-harness dlp unmask -V vault.jsonl sanitized.log > original.log
+```
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+---
+
+## Core Engine Components
+
+| Component | Role | Description |
+| :--- | :--- | :--- |
+| **`HarnessEngine`** | Process Supervisor | Launches child processes, drops OS privileges (`user`/`group`/`umask`), forwards POSIX signals, and manages the non-blocking I/O loop. |
+| **`AnnotationCodec`** | In-Band Protocol | Parses `# @harness.<domain>:<action> key=val` strings from standard output into strongly typed `Instruction` objects. |
+| **`CoprocessorRouter`** | Intent Dispatcher | Binds and dispatches instructions to their domain coprocessor and maintains the active chain of stream mutation filters. |
+| **`HeapScheduler`** | Discrete Event Core | High-performance heap-based priority queue for sub-millisecond virtual clock scheduling and timer events. |
+| **`TimerCoprocessor`** | Time & Clocks | Manages periodic timers, tick counts, and writes time events back into the child's `stdin`. |
+| **`DlpCoprocessor`** | Stream Sanitizer | Executes multi-action pattern mutations (`mask`, `hash`, `alias`) and records mapping events. |
+| **`BiMapVault`** | Reversible Pseudonyms | In-memory 1:1 forward/reverse map backed by an append-only JSONL Write-Ahead Log (`vault.jsonl`). |
+
+---
+
+## DLP Transformation Actions & WAL Schema
+
+### Supported Mutation Strategies
+
+- **`mask`** : Destructive static redaction (e.g. `[REDACTED]`, `Bearer [AUTH_TOKEN]`).
+- **`hash`** : Truncated HMAC-SHA256 with secret salt (e.g. `tok_{hash:8}` $\to$ `tok_3f8a1b2c`).
+- **`alias`** : Stateful 1:1 bijective sequence pseudonym (e.g. `client_{seq.cust:03d}` $\to$ `client_001`). Reversible via `fd-harness dlp unmask`.
+
+### Rules Specification (`dlp-rules.toml`)
+
+```toml
+[dlp]
+fail_on_leak = false
+summary = true
+vault_file = "vault.jsonl"
+salt = "cluster-secret-salt"
+
+[[rules]]
+name = "customer-id"
+pattern = 'CUST-\d{4}'
+action = "alias"
+template = "client_{seq.cust:03d}"
+
+[[rules]]
+name = "internal-ip"
+pattern = '10\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+action = "alias"
+template = "internal_ip_{seq.ip:02d}"
+
+[[rules]]
+name = "auth-token"
+pattern = 'Bearer\s+[A-Za-z0-9_\-\.]{20,}'
+action = "mask"
+template = "Bearer [REDACTED_TOKEN]"
+```
+
+### Event-Sourced Vault WAL (`vault.jsonl`)
+
+The BiMap vault is stored on disk as a non-redundant, append-only JSONL stream. Reverse mappings ($B \to A$) are dynamically reconstructed in RAM on startup:
+
+```jsonl
+{"type": "vault_settings", "properties": {"version": 1, "salt": "cluster-secret-salt", "counters": {"cust": 2, "ip": 2}}}
+{"type": "mapping_item", "properties": {"raw": "CUST-1042", "alias": "client_001", "rule_id": "customer-id", "created": 1789604316.348}}
+{"type": "mapping_item", "properties": {"raw": "10.0.0.42", "alias": "internal_ip_01", "rule_id": "internal-ip", "created": 1789604316.350}}
+```
+
+---
+
+## CLI Command Hierarchy
+
+```
+fd-harness
+├── run          # Supervise command with in-band directive parsing & privilege drop
+├── coord        # Multi-engine topology coordinator (reads harness.toml)
+├── dlp          # Specialized Data Loss Prevention suite
+│   ├── redact   # Real-time stream sanitization (wrapper or stdin pipe)
+│   └── unmask   # Reversible unmasking via BiMap vault
+└── version      # Display version
+```
+
+### Key CLI Flags
+
+- **Privilege Dropping (Run-As)** : `-u, --user <user[:group]>`, `-g, --group <group>`, `--umask <octal>`.
+- **DLP Sanitization** : `-r, --rules <file>`, `-m, --mask <pattern=replacement>`, `-V, --vault <file>`, `--salt <str>`, `--fail-on-leak`.
+- **Telemetry & Tracing** : `-v, --show-directives`, `--log-level <lvl>`, `-t, --log-target <:stdout|:stderr|path>`, `-f, --log-format <text|jsonl>`, `--strace <path>`.
+
+---
+
+## Verification & Tests
+
+The test suite runs deterministically with a virtual clock in **under 60 milliseconds** using Python's built-in `unittest`:
+
+```bash
+python3 -m unittest discover -s tests -p "test_*.py"
+```
+
+To run the interactive DLP demo:
+```bash
+cd samples/11-redact
+./run-demo.sh
+```
+
+---
+
+## Design Principles
+
+1. **Zero External Dependencies**: Pure Python standard library core. No external wheels required in production.
+2. **Deterministic & Fast**: Sub-millisecond virtual clock scheduling; sub-process startup overhead under 10ms.
+3. **Transparent Composition**: Adheres strictly to standard Unix streams and POSIX conventions.
