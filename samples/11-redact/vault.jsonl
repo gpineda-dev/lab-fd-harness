@@ -1,0 +1,3 @@
+{"type": "vault_settings", "properties": {"version": 1, "salt": "demo-vault-salt-42", "counters": {"cust": 1, "ip": 1}}}
+{"type": "mapping_item", "properties": {"raw": "CUST-1042", "alias": "client_001", "rule_id": "customer-id", "created": 1789849085.63}}
+{"type": "mapping_item", "properties": {"raw": "10.0.0.42", "alias": "internal_ip_01", "rule_id": "internal-ip", "created": 1789849085.63}}

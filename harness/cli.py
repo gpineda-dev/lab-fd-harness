@@ -319,7 +319,7 @@ def execute_unmask(vault_file: Union[str, Path], file_path: Optional[Union[str, 
         return 1
 
     vault_obj = BiMapVault.load_file(vpath)
-    if file_path:
+    if file_path and str(file_path) != "-":
         with open(file_path, "r", encoding="utf-8") as f:
             for line in f:
                 sys.stdout.write(vault_obj.unmask_line(line))

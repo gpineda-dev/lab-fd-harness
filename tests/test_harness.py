@@ -1231,6 +1231,16 @@ class TestHarness(unittest.TestCase):
         self.assertEqual(loaded_vault_json.forward["CUST-1001"], "client_001")
         self.assertEqual(loaded_vault_json.reverse["client_001"], "CUST-1001")
 
+        # Test execute_unmask with '-' representing stdin
+        from harness.cli import execute_unmask
+        import io
+        from unittest.mock import patch
+
+        with patch("sys.stdin", io.StringIO(l1)), patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            code = execute_unmask(vault_jsonl_file, "-")
+            self.assertEqual(code, 0)
+            self.assertEqual(mock_stdout.getvalue(), "Connect CUST-1001 via IP:10.0.0.5\n")
+
     def test_dlp_inband_directive_alias(self):
         codec = AnnotationCodec()
         inst = codec.decode('# @harness.filter:mask pattern="user_[0-9]+" action="alias" template="u_{seq:02d}" name="usr"')
