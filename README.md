@@ -2,9 +2,32 @@
 
 > **Stream Interposition Microkernel & Coprocessor Supervisor for Unix File Descriptors**
 
+[![Series: First Principles](https://img.shields.io/badge/Series-First%20Principles-blue)](https://g.pineda.me/en/tags/file_descriptor/)
+[![Status: Experimental Lab](https://img.shields.io/badge/Status-Research%20Lab%20%2F%20PoC-orange)](#experimental-status--disclaimer)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+
 `fd-harness` is a lightweight, zero-dependency process supervisor that interposes itself between the outer environment and one or more supervised child processes. 
 
 By treating standard file descriptors (`stdin`, `stdout`, `stderr`) as a bidirectional, reactive communication channel, `fd-harness` enables **real-time in-flight stream mutation**, **in-band IPC through log annotations**, and **specialized coprocessor routing** without requiring external SDKs, sidecars, or source code modifications.
+
+---
+
+> [!CAUTION] **Experimental Status & Disclaimer**  
+> `fd-harness` is an **exploratory research lab, proof-of-concept, and educational playground** designed to investigate Unix and OS primitives from first principles. It is **NOT intended for production deployment as an off-the-shelf security product**. APIs, configuration formats, and internal interfaces are subject to breaking changes without notice. Use at your own risk for study, experimentation, and research.
+
+---
+
+## 📖 Deep-Dive Articles & Companion Labs
+
+This repository serves as the reference implementation for the **First Principles Systems Series**:
+
+* 📄 **Act I (Essay & Autopsy):** [What If Everything (Really) Were Just a File Descriptor? Act I: The Control Plane of stdout](https://g.pineda.me/en/posts/2026-09-18-harness-introduction-with-dlp/) *(🇫🇷 [Version Française](https://g.pineda.me/fr/posts/2026-09-18-harness-introduction-with-dlp/))*
+* 📜 **Manifesto:** [From the Whiteboard to First Principles: AI as a Builder's Exoskeleton, Not an Oracle](https://g.pineda.me/en/posts/2026-09-19-ai-exoskelton-for-builders-not-oracle/) *(🇫🇷 [Version Française](https://g.pineda.me/fr/posts/2026-09-19-ai-exoskelton-for-builders-not-oracle/))*
+* 🧪 **Companion Reproducible Labs:**
+  * [`01-systemd-socket-bash-server`](https://github.com/gpineda-dev/lab-first-principles-samples/tree/main/01-systemd-socket-bash-server) — Raw socket activation & kernel autopsy.
+  * [`02-bash-ansi-csi`](https://github.com/gpineda-dev/lab-first-principles-samples/tree/main/02-bash-ansi-csi) — Zero-fork ANSI CSI terminal state machine.
+  * [`03-systemd-socket-dlp-harness`](https://github.com/gpineda-dev/lab-first-principles-samples/tree/main/03-systemd-socket-dlp-harness) — Transparent network membrane under `systemd.socket`.
+  * [`04-sudoers-dlp-bastion`](https://github.com/gpineda-dev/lab-first-principles-samples/tree/main/04-sudoers-dlp-bastion) — SRE bastion pattern & `/etc/sudoers` delegation.
 
 ---
 
