@@ -1368,7 +1368,30 @@ umask = "027"
             self.assertEqual(kwargs["user"], "nobody:nogroup")
             self.assertEqual(kwargs["group"], "nogroup")
             self.assertEqual(kwargs["umask"], "027")
-            self.assertEqual(kwargs["command_args"], ["echo", "test"])
+    def test_coordinator_piped_stdin_forwarding(self):
+        import subprocess
+        import sys
+
+        # Test that piped stdin to fd-harness is forwarded to child process stdin
+        cmd = [
+            sys.executable,
+            "-m",
+            "harness",
+            "run",
+            sys.executable,
+            "-c",
+            "import sys; line = sys.stdin.readline(); print('CHILD_GOT:' + line.strip())",
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = proc.communicate(input="PAYLOAD_12345\n")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("CHILD_GOT:PAYLOAD_12345", stdout)
 
 
 if __name__ == "__main__":

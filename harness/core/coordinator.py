@@ -162,19 +162,41 @@ class HarnessCoordinator:
                             # Channel closed / EOF
                             pass
 
-                # E. Handle user terminal input
+                # E. Handle user terminal or piped input
                 if stdin_active and stdin_fileno in rlist and active_stdin_engine and active_stdin_engine.user_w_open:
                     try:
                         data = os.read(stdin_fileno, 4096)
                         if data:
                             if is_tty and active_stdin_engine.editor:
                                 active_stdin_engine.editor.feed_bytes(data)
-                            elif active_stdin_engine.user_w:
-                                os.write(active_stdin_engine.user_w, data)
+                            else:
+                                if active_stdin_engine.user_w:
+                                    try:
+                                        os.write(active_stdin_engine.user_w, data)
+                                    except (OSError, ValueError):
+                                        pass
+                                if (
+                                    active_stdin_engine.proc
+                                    and active_stdin_engine.proc.stdin
+                                    and not active_stdin_engine.proc.stdin.closed
+                                ):
+                                    try:
+                                        os.write(active_stdin_engine.proc.stdin.fileno(), data)
+                                    except (OSError, ValueError):
+                                        pass
                         else:
                             # EOF on stdin
                             stdin_active = False
                             active_stdin_engine.close_user_w()
+                            if (
+                                active_stdin_engine.proc
+                                and active_stdin_engine.proc.stdin
+                                and not active_stdin_engine.proc.stdin.closed
+                            ):
+                                try:
+                                    active_stdin_engine.proc.stdin.close()
+                                except (OSError, ValueError):
+                                    pass
                     except (OSError, ValueError):
                         stdin_active = False
 
