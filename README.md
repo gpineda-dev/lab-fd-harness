@@ -1,6 +1,6 @@
 # fd-harness
 
-> **Stream Interposition Microkernel & Coprocessor Supervisor for Unix File Descriptors**
+> **Reactive Stream Interposition Harness & Coprocessor Supervisor for Unix File Descriptors**
 
 [![Series: First Principles](https://img.shields.io/badge/Series-First%20Principles-blue)](https://g.pineda.me/en/tags/file_descriptor/)
 [![Status: Experimental Lab](https://img.shields.io/badge/Status-Research%20Lab%20%2F%20PoC-orange)](#experimental-status--disclaimer)
@@ -22,7 +22,7 @@ By treating standard file descriptors (`stdin`, `stdout`, `stderr`) as a bidirec
 This repository serves as the reference implementation for the **First Principles Systems Series**:
 
 * 📄 **Act I (Essay & Autopsy):** [What If Everything (Really) Were Just a File Descriptor? Act I: The Control Plane of stdout](https://g.pineda.me/en/posts/2026-09-18-harness-introduction-with-dlp/) *(🇫🇷 [Version Française](https://g.pineda.me/fr/posts/2026-09-18-harness-introduction-with-dlp/))*
-* 📜 **Manifesto:** [From the Whiteboard to First Principles: AI as a Builder's Exoskeleton, Not an Oracle](https://g.pineda.me/en/posts/2026-09-19-ai-exoskelton-for-builders-not-oracle/) *(🇫🇷 [Version Française](https://g.pineda.me/fr/posts/2026-09-19-ai-exoskelton-for-builders-not-oracle/))*
+* 📜 **Manifesto:** [The Craftsman's Exoskeleton: AI as a Mechanical Amplifier, Not an Oracle](https://g.pineda.me/en/posts/2026-09-19-ai-exoskelton-for-builders-not-oracle/) *(🇫🇷 [Version Française](https://g.pineda.me/fr/posts/2026-09-19-ai-exoskelton-for-builders-not-oracle/))*
 * 🧪 **Companion Reproducible Labs:**
   * [`01-systemd-socket-bash-server`](https://github.com/gpineda-dev/lab-first-principles-samples/tree/main/01-systemd-socket-bash-server) — Raw socket activation & kernel autopsy.
   * [`02-bash-ansi-csi`](https://github.com/gpineda-dev/lab-first-principles-samples/tree/main/02-bash-ansi-csi) — Zero-fork ANSI CSI terminal state machine.
